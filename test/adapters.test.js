@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import {
   buildInstallPlan,
   buildUninstallPlan,
+  MATT_POCOCK_WORKFLOW_SKILLS,
   mattPocockSkillsInstallArgs,
   mattPocockSkillsInstaller,
   mergeWrite,
@@ -31,6 +32,7 @@ test("OpenCode adapter emits native command and local MCP configuration", () => 
   const plan = buildInstallPlan({ harness: "opencode", scope: "project", cwd: "C:/repo", home: "C:/user" });
   const config = plan.writes.find((write) => write.file.endsWith("opencode.json")).value;
   assert.ok(config.command.delivery.template.includes("delivery orchestrator"));
+  assert.ok(config.command.delivery.template.includes("infer the full namespace/project path"));
   assert.ok(config.command["grill-with-docs"].template.includes("one highest-risk material question"));
   assert.ok(config.command.wayfinder.template.includes("smallest independent investigation slices"));
   assert.ok(config.command["improve-codebase-architecture"].template.includes("incremental, reversible improvement plan"));
@@ -44,15 +46,17 @@ test("GitLab instance URLs are normalized to the GitLab v4 API endpoint", () => 
   assert.equal(normalizeGitLabApiUrl("https://gitlab.gapit.com.vn/api/v4/"), "https://gitlab.gapit.com.vn/api/v4");
 });
 
-test("all Matt Pocock skills are copied only for the selected harness and scope", () => {
-  assert.deepEqual(mattPocockSkillsInstallArgs({ harness: "opencode", scope: "project" }), [
-    "--yes", "skills@latest", "add", "mattpocock/skills", "--skill", "*", "--agent", "opencode", "--yes", "--copy"
-  ]);
+test("only curated Matt Pocock workflow skills are copied by default", () => {
+  const workflowArgs = mattPocockSkillsInstallArgs({ harness: "opencode", scope: "project" });
+  assert.equal(MATT_POCOCK_WORKFLOW_SKILLS.length, 14);
+  assert.equal(workflowArgs.includes("*"), false);
+  for (const skill of MATT_POCOCK_WORKFLOW_SKILLS) assert.ok(workflowArgs.includes(skill));
+  assert.deepEqual(mattPocockSkillsInstallArgs({ harness: "opencode", scope: "project", mode: "all" }).slice(4, 6), ["--skill", "*"]);
   assert.deepEqual(mattPocockSkillsInstallArgs({ harness: "pi", scope: "global" }).slice(-2), ["--copy", "--global"]);
-  assert.deepEqual(mattPocockSkillsInstaller({ harness: "opencode", scope: "project", platform: "win32" }), {
-    command: "cmd.exe",
-    args: ["/d", "/s", "/c", "npx --yes skills@latest add mattpocock/skills --skill * --agent opencode --yes --copy"]
-  });
+  const windowsInstaller = mattPocockSkillsInstaller({ harness: "opencode", scope: "project", platform: "win32" });
+  assert.equal(windowsInstaller.command, "cmd.exe");
+  assert.ok(windowsInstaller.args[3].includes("--skill grill-with-docs"));
+  assert.equal(windowsInstaller.args[3].includes("--skill writing-beats"), false);
   assert.throws(() => mattPocockSkillsInstaller({ harness: "opencode & whoami", scope: "project", platform: "win32" }), /Unsupported harness/);
 });
 

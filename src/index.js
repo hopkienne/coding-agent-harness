@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as prompts from "@clack/prompts";
 import { buildInstallPlan, buildUninstallPlan, mergeWrite, removeManagedContent } from "./adapters.js";
+import { MATT_POCOCK_WORKFLOW_SKILLS } from "./workflow.js";
 
 const execFileAsync = promisify(execFile);
 const HARNESS_CHOICES = [
@@ -17,6 +18,7 @@ const SCOPE_CHOICES = [
   { value: "project", label: "Project", hint: "Only this repository" },
   { value: "global", label: "Global", hint: "Every local project" }
 ];
+const MATT_POCOCK_SKILL_MODES = ["workflow", "all", "none"];
 
 class InstallationCancelled extends Error {}
 
@@ -31,7 +33,8 @@ Commands:
 Options for init:
   --harness <pi|claude-code|codex|opencode>
   --scope <project|global>                 Default: project
-  --with-matt-pocock-skills                Install all original Matt Pocock skills for the selected harness
+  --matt-pocock-skills <workflow|all|none> Default with --yes: none
+  --with-matt-pocock-skills                Alias for --matt-pocock-skills workflow
   --dry-run                                Print planned files without writing
   --yes                                    Non-interactive; reads secret values from environment
   --help`;
@@ -40,13 +43,14 @@ Options for init:
 function parseArgs(argv) {
   const [command = "help", ...rest] = argv;
   if (command === "--help" || command === "-h") return { command: "help", help: true };
-  const options = { command, dryRun: false, yes: false, withMattPocockSkills: false };
+  const options = { command, dryRun: false, yes: false };
   for (let index = 0; index < rest.length; index += 1) {
     const item = rest[index];
     if (item === "--dry-run") options.dryRun = true;
     else if (item === "--yes") options.yes = true;
-    else if (item === "--with-matt-pocock-skills") options.withMattPocockSkills = true;
+    else if (item === "--with-matt-pocock-skills") options.mattPocockSkills = "workflow";
     else if (item === "--help" || item === "-h") options.help = true;
+    else if (item === "--matt-pocock-skills") options.mattPocockSkills = rest[++index];
     else if (item === "--harness" || item === "--scope") {
       options[item.slice(2)] = rest[++index];
     } else throw new Error(`Unknown option: ${item}`);
@@ -69,10 +73,12 @@ export function normalizeGitLabApiUrl(value = "") {
 async function collectOptions(options) {
   if (options.yes) {
     if (!options.harness) throw new Error("--yes requires --harness.");
+    const mattPocockSkills = options.mattPocockSkills ?? "none";
+    if (!MATT_POCOCK_SKILL_MODES.includes(mattPocockSkills)) throw new Error("Choose workflow, all, or none for --matt-pocock-skills.");
     return {
       ...options,
       scope: options.scope ?? "project",
-      installMattPocockSkills: options.withMattPocockSkills
+      mattPocockSkills
     };
   }
   const harness = options.harness ?? unwrapPrompt(await prompts.select({
@@ -86,13 +92,14 @@ async function collectOptions(options) {
     options: SCOPE_CHOICES,
     initialValue: "project"
   }));
-  const installMattPocockSkills = unwrapPrompt(await prompts.select({
-    message: "Step 3 of 4 — Install all original Matt Pocock skills?",
+  const mattPocockSkills = unwrapPrompt(await prompts.select({
+    message: "Step 3 of 4 — Choose Matt Pocock skills",
     options: [
-      { value: true, label: "Yes", hint: "Copy every available skill from mattpocock/skills for this harness" },
-      { value: false, label: "No", hint: "Use the built-in workflow commands only" }
+      { value: "workflow", label: "Workflow skills", hint: "Recommended — only 14 skills used by this delivery workflow" },
+      { value: "all", label: "All skills", hint: "Copy every skill from mattpocock/skills" },
+      { value: "none", label: "None", hint: "Use the built-in workflow commands only" }
     ],
-    initialValue: false
+    initialValue: "workflow"
   }));
   const configureSecrets = unwrapPrompt(await prompts.select({
     message: "Step 4 of 4 — Configure Jira and GitLab credentials now?",
@@ -122,17 +129,20 @@ async function collectOptions(options) {
     GITLAB_API_URL: normalizeGitLabApiUrl(gitLabApiUrl),
     GITLAB_PERSONAL_ACCESS_TOKEN: unwrapPrompt(await prompts.password({ message: "GitLab personal access token", mask: "*" }))
   } : undefined;
-  return { ...options, harness, scope, installMattPocockSkills, secrets };
+  return { ...options, harness, scope, mattPocockSkills, secrets };
 }
 
-export function mattPocockSkillsInstallArgs({ harness, scope }) {
+export function mattPocockSkillsInstallArgs({ harness, scope, mode = "workflow" }) {
+  if (!MATT_POCOCK_SKILL_MODES.includes(mode) || mode === "none") throw new Error("Matt Pocock skill mode must be workflow or all when installing.");
+  const skillArgs = mode === "all"
+    ? ["--skill", "*"]
+    : MATT_POCOCK_WORKFLOW_SKILLS.flatMap((skill) => ["--skill", skill]);
   const args = [
     "--yes",
     "skills@latest",
     "add",
     "mattpocock/skills",
-    "--skill",
-    "*",
+    ...skillArgs,
     "--agent",
     harness,
     "--yes",
@@ -142,10 +152,10 @@ export function mattPocockSkillsInstallArgs({ harness, scope }) {
   return args;
 }
 
-export function mattPocockSkillsInstaller({ harness, scope, platform = process.platform }) {
+export function mattPocockSkillsInstaller({ harness, scope, mode = "workflow", platform = process.platform }) {
   if (!HARNESS_CHOICES.some((choice) => choice.value === harness)) throw new Error(`Unsupported harness: ${harness}`);
   if (!SCOPE_CHOICES.some((choice) => choice.value === scope)) throw new Error(`Unsupported scope: ${scope}`);
-  const args = mattPocockSkillsInstallArgs({ harness, scope });
+  const args = mattPocockSkillsInstallArgs({ harness, scope, mode });
   if (platform !== "win32") return { command: "npx", args };
   return {
     command: "cmd.exe",
@@ -153,8 +163,8 @@ export function mattPocockSkillsInstaller({ harness, scope, platform = process.p
   };
 }
 
-async function installMattPocockSkills({ harness, scope }) {
-  const installer = mattPocockSkillsInstaller({ harness, scope });
+async function installMattPocockSkills({ harness, scope, mattPocockSkills }) {
+  const installer = mattPocockSkillsInstaller({ harness, scope, mode: mattPocockSkills });
   await execFileAsync(installer.command, installer.args, {
     cwd: process.cwd(),
     windowsHide: true,
@@ -246,10 +256,13 @@ async function init(options) {
       harness: selected.harness,
       scope: selected.scope,
       cwd: process.cwd(),
-      includeMattPocockSetup: selected.installMattPocockSkills
+      includeMattPocockSetup: selected.mattPocockSkills !== "none"
     });
     if (interactive) {
-      prompts.note(`Harness: ${selected.harness}\nScope: ${selected.scope}\nFiles: ${new Set(plan.writes.map((write) => write.file)).size}\nMatt Pocock skills: ${selected.installMattPocockSkills ? "all skills will be copied" : "not selected"}\nGitLab writes: none until you explicitly approve them.`, "Ready to install");
+      const skillSummary = selected.mattPocockSkills === "workflow"
+        ? `${MATT_POCOCK_WORKFLOW_SKILLS.length} workflow skills`
+        : selected.mattPocockSkills === "all" ? "all skills" : "not selected";
+      prompts.note(`Harness: ${selected.harness}\nScope: ${selected.scope}\nFiles: ${new Set(plan.writes.map((write) => write.file)).size}\nMatt Pocock skills: ${skillSummary}\nGitLab writes: none until you explicitly approve them.`, "Ready to install");
     }
 
     progress = interactive ? prompts.spinner() : undefined;
@@ -259,8 +272,8 @@ async function init(options) {
     if (!interactive) for (const file of files) console.log(`${selected.dryRun ? "[dry-run]" : "created/updated"} ${file}`);
 
     let installedMattPocockSkills = false;
-    if (selected.installMattPocockSkills && !selected.dryRun) {
-      progress?.start("Copying original Matt Pocock skills (may take a few minutes)");
+    if (selected.mattPocockSkills !== "none" && !selected.dryRun) {
+      progress?.start(`Copying ${selected.mattPocockSkills === "workflow" ? "workflow" : "all"} Matt Pocock skills (may take a few minutes)`);
       await installMattPocockSkills(selected);
       installedMattPocockSkills = true;
       progress?.stop("Original Matt Pocock skills copied");
@@ -270,7 +283,7 @@ async function init(options) {
     if (interactive) {
       prompts.note(files.map((file) => path.relative(process.cwd(), file) || path.basename(file)).join("\n"), selected.dryRun ? "Planned files" : "Installed files");
       if (installedMattPocockSkills) {
-        prompts.log.success(`Copied all original Matt Pocock skills for ${selected.harness}. Matching workflow commands now prefer those skills.`);
+        prompts.log.success(`Copied ${selected.mattPocockSkills === "workflow" ? `${MATT_POCOCK_WORKFLOW_SKILLS.length} workflow` : "all"} Matt Pocock skills for ${selected.harness}. Matching workflow commands now prefer those skills.`);
         prompts.log.success("Bootstrapped the original skills' repository configuration for Jira requirements, GitLab delivery, triage labels, and domain docs.");
       }
       if (persisted) prompts.log.success("Jira and GitLab credentials were saved to Windows user environment variables.");
@@ -279,7 +292,7 @@ async function init(options) {
       prompts.outro(selected.dryRun ? "No files were changed." : "Installation complete. Restart the harness terminal, then begin a delivery.");
     } else {
       if (installedMattPocockSkills) {
-        console.log(`Copied all original Matt Pocock skills for ${selected.harness}. Matching workflow commands now prefer those skills.`);
+        console.log(`Copied ${selected.mattPocockSkills === "workflow" ? `${MATT_POCOCK_WORKFLOW_SKILLS.length} workflow` : "all"} Matt Pocock skills for ${selected.harness}. Matching workflow commands now prefer those skills.`);
         console.log("Bootstrapped the original skills' repository configuration for Jira requirements, GitLab delivery, triage labels, and domain docs.");
       }
       if (selected.secrets && !persisted && !selected.dryRun) console.log("Secrets were not persisted on this platform. Export the requested environment variables before starting the harness.");
@@ -337,4 +350,4 @@ export async function main(argv) {
   throw new Error(`Unknown command: ${options.command}`);
 }
 
-export { buildInstallPlan, buildUninstallPlan, mergeWrite, removeManagedContent };
+export { buildInstallPlan, buildUninstallPlan, MATT_POCOCK_WORKFLOW_SKILLS, mergeWrite, removeManagedContent };

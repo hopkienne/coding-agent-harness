@@ -63,8 +63,8 @@ The interactive installer is a guided terminal wizard: it opens with an overview
 ◇  Step 2 of 4 — Choose the installation scope
 │  Project
 │
-◇  Step 3 of 4 — Install all original Matt Pocock skills?
-│  Yes
+◇  Step 3 of 4 — Choose Matt Pocock skills
+│  Workflow skills (recommended)
 │
 ◇  Step 4 of 4 — Configure Jira and GitLab credentials now?
 │  Yes, configure now
@@ -75,10 +75,16 @@ The interactive installer is a guided terminal wizard: it opens with an overview
 Then start a delivery:
 
 ```text
-/delivery PROJ-123 group/project
+/delivery PROJ-123
 ```
 
-The agent reads the Jira issue, begins the grill, and asks exactly one material question at a time. It advances automatically after the decision is clear.
+The agent reads the Jira issue, infers the GitLab project from the current repository's remote, begins the grill, and asks exactly one material question at a time. It advances automatically after the decision is clear.
+
+The optional `group/project` argument is GitLab's full project namespace. For example, repository URL `https://gitlab.example.com/platform/mobile/edupath.git` has project path `platform/mobile/edupath`. Supply it only when the repository has no GitLab remote or more than one remote is ambiguous:
+
+```text
+/delivery PROJ-123 platform/mobile/edupath
+```
 
 > **When developing this repository:** run the local CLI directly. Do not use `npx @hopkienne/coding-agent-harness` from inside this source directory, because npm resolves the local project before the published executable:
 >
@@ -88,7 +94,13 @@ The agent reads the Jira issue, begins the grill, and asks exactly one material 
 
 ## Original Matt Pocock skills
 
-The built-in commands make the delivery workflow portable. Selecting **Yes** in step 3 additionally copies every currently discoverable skill from [`mattpocock/skills`](https://github.com/mattpocock/skills) into the selected harness and scope. It uses the official Skills CLI with a copied installation, so the project does not depend on a temporary clone or a symlink.
+The built-in commands make the delivery workflow portable. Step 3 offers three modes:
+
+- **Workflow skills (recommended)** copies only the 14 original skills used directly or transitively by this delivery workflow.
+- **All skills** copies every currently discoverable skill from [`mattpocock/skills`](https://github.com/mattpocock/skills).
+- **None** uses the built-in workflow commands without downloading third-party skills.
+
+The installer uses the official Skills CLI with a copied installation, so the project does not depend on a temporary clone or a symlink.
 
 For the overlapping engineering steps—`/grill-with-docs`, `/wayfinder`, `/to-spec`, `/to-tickets`, `/implement`, `/tdd`, `/code-review`, `/diagnosing-bugs`, and `/improve-codebase-architecture`—the generated workflow command treats the original `SKILL.md` as its primary procedure. The harness layer continues to enforce its non-negotiable rules: Jira is the requirement source and every GitLab write or merge request requires an explicit human confirmation.
 
@@ -97,7 +109,7 @@ The installer also completes the one-time repository setup normally performed by
 The optional Skills CLI currently requires Node.js **22.20 or newer**. The base harness remains compatible with Node.js 20.12 or newer. For unattended setup, opt in explicitly:
 
 ```bash
-npx @hopkienne/coding-agent-harness init --harness opencode --scope project --yes --with-matt-pocock-skills
+npx @hopkienne/coding-agent-harness init --harness opencode --scope project --yes --matt-pocock-skills workflow
 ```
 
 ## Harness support
@@ -174,6 +186,9 @@ npx @hopkienne/coding-agent-harness init
 
 # Preview every file change without writing
 npx @hopkienne/coding-agent-harness init --harness opencode --scope project --yes --dry-run
+
+# Install every Matt Pocock skill instead of the curated workflow set
+npx @hopkienne/coding-agent-harness init --harness opencode --scope project --yes --matt-pocock-skills all
 
 # Remove generated commands and workflow instructions (keeps MCP, credentials, and skills)
 npx @hopkienne/coding-agent-harness uninstall --harness opencode --scope project --yes

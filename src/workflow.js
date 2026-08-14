@@ -10,6 +10,15 @@ export const MATT_POCOCK_SKILL_COMMANDS = new Set([
   "improve-codebase-architecture"
 ]);
 
+export const MATT_POCOCK_WORKFLOW_SKILLS = [
+  ...MATT_POCOCK_SKILL_COMMANDS,
+  "domain-modeling",
+  "codebase-design",
+  "grilling",
+  "research",
+  "prototype"
+];
+
 export const MATT_POCOCK_AGENT_SKILLS_BLOCK = `
 ## Agent skills
 
@@ -81,8 +90,8 @@ function defineCommand(description, argumentHint, template, { preferMattPocockSk
 export const WORKFLOW_COMMANDS = {
   delivery: defineCommand(
     "Orchestrate the complete guarded Jira-to-GitLab delivery workflow",
-    "<JIRA-KEY> [GitLab project path]",
-    `You are the delivery orchestrator for Jira $1 and GitLab project \`\${2:-the configured GitLab project}\`. Execute this workflow in the current conversation; do not ask the human to invoke other slash commands.
+    "<JIRA-KEY> [group/project]",
+    `You are the delivery orchestrator for Jira $1. Use $2 as the GitLab project path when supplied; otherwise inspect the current repository's git remote and infer the full namespace/project path, preserving nested subgroups and removing the host and trailing .git. Ask the human for the path only when no unambiguous GitLab remote exists. Execute this workflow in the current conversation; do not ask the human to invoke other slash commands.
 
 Maintain a compact phase ledger in every response: phase, evidence, next action, and human decision needed.
 
@@ -125,8 +134,8 @@ The spec must trace acceptance criteria and include scope, non-goals, contracts,
   ),
   "to-tickets": defineCommand(
     "Turn an approved spec into small, dependency-aware GitLab technical tickets",
-    "<JIRA-KEY> <GitLab project path>",
-    `Read docs/specs/$1.md and the linked Jira acceptance criteria. Propose a complete list of tracer-bullet GitLab tickets for project $2. Each ticket must have a narrow outcome, acceptance criteria, test evidence, labels, dependencies, and links to Jira/spec.
+    "<JIRA-KEY> [group/project]",
+    `Read docs/specs/$1.md and the linked Jira acceptance criteria. Use $2 as the GitLab project path when supplied; otherwise infer the full namespace/project path from the current repository's GitLab remote. Ask only if it is missing or ambiguous. Propose a complete list of tracer-bullet GitLab tickets for that project. Each ticket must have a narrow outcome, acceptance criteria, test evidence, labels, dependencies, and links to Jira/spec.
 
 Show the full ticket and dependency plan first. Ask for explicit confirmation immediately before creating, labeling, linking, or changing any GitLab issue. After confirmation, create only the approved plan and report every resulting URL.`,
     { preferMattPocockSkill: true, originalSkillName: "to-tickets" }
@@ -196,11 +205,11 @@ Use the installed Jira → architecture → spec → GitLab → TDD/UI verificat
 
 ### Installed commands
 
-- \`/delivery <JIRA-KEY> [project]\` — run the end-to-end guarded workflow.
+- \`/delivery <JIRA-KEY> [group/project]\` — run the end-to-end guarded workflow; infer the GitLab project from the remote when omitted.
 - \`/grill-with-docs <JIRA-KEY>\` — resolve ambiguity and write durable decisions.
 - \`/wayfinder <area>\` — map a large or unfamiliar initiative into investigations.
 - \`/to-spec <JIRA-KEY>\` — create the traced implementation spec.
-- \`/to-tickets <JIRA-KEY> <project>\` — propose and, after confirmation, create GitLab tickets.
+- \`/to-tickets <JIRA-KEY> [group/project]\` — propose and, after confirmation, create GitLab tickets.
 - \`/implement <issue>\` and \`/tdd [scope]\` — build with RED → GREEN → refactor.
 - \`/verify-ui <URL-or-flow>\` — test UI with Chrome DevTools MCP.
 - \`/code-review [scope]\` and \`/create-mr <branch> [target]\` — review, then create an approved MR.
