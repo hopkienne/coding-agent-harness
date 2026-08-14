@@ -12,8 +12,16 @@ import {
 } from "./workflow.js";
 
 function joinInstructions(existing = "") {
-  if (existing.includes("## Guarded delivery workflow")) return existing;
-  return `${existing.trimEnd()}\n${WORKFLOW_INSTRUCTIONS}`.trimStart();
+  const heading = "## Guarded delivery workflow";
+  const workflow = WORKFLOW_INSTRUCTIONS.trim();
+  const start = existing.indexOf(heading);
+  if (start < 0) {
+    const prefix = existing.trimEnd();
+    return `${prefix}${prefix ? "\n\n" : ""}${workflow}\n`;
+  }
+  const nextSection = existing.indexOf("\n## ", start + heading.length);
+  const suffix = nextSection < 0 ? "" : existing.slice(nextSection);
+  return `${existing.slice(0, start).trimEnd()}${start > 0 ? "\n\n" : ""}${workflow}${suffix ? `\n${suffix.trimStart()}` : "\n"}`;
 }
 
 function joinAgentSkills(existing = "") {
@@ -22,10 +30,14 @@ function joinAgentSkills(existing = "") {
 }
 
 const JIRA_AUTH_ENV_KEYS = ["JIRA_USERNAME", "JIRA_API_TOKEN", "JIRA_PERSONAL_TOKEN"];
+const GOOGLE_DOCS_ENV_KEYS = ["GOOGLE_DRIVE_OAUTH_CREDENTIALS", "GOOGLE_DRIVE_MCP_SCOPES"];
+const CODEX_MCP_START = "# >>> coding-agent-harness MCP >>>";
+const CODEX_MCP_END = "# <<< coding-agent-harness MCP <<<";
 
 function mergeManagedServer(existing = {}, generated = {}, name) {
   const existingEnvironment = { ...(existing.env ?? existing.environment) };
   if (name === "jira") for (const key of JIRA_AUTH_ENV_KEYS) delete existingEnvironment[key];
+  if (name === "google-docs") for (const key of GOOGLE_DOCS_ENV_KEYS) delete existingEnvironment[key];
   const generatedEnvironment = generated.env ?? generated.environment;
   const environmentKey = "environment" in generated ? "environment" : "env";
   return {
@@ -33,6 +45,54 @@ function mergeManagedServer(existing = {}, generated = {}, name) {
     ...generated,
     [environmentKey]: { ...existingEnvironment, ...generatedEnvironment }
   };
+}
+
+function tomlString(value) {
+  return JSON.stringify(String(value));
+}
+
+function codexMcpBlock(servers) {
+  const sections = [];
+  for (const [name, server] of Object.entries(servers)) {
+    const forwardedEnvironment = [];
+    const staticEnvironment = {};
+    for (const [key, value] of Object.entries(server.env ?? {})) {
+      if (value === `\${${key}}`) forwardedEnvironment.push(key);
+      else staticEnvironment[key] = value;
+    }
+    const lines = [
+      `[mcp_servers.${tomlString(name)}]`,
+      `command = ${tomlString(server.command)}`,
+      `args = [${server.args.map(tomlString).join(", ")}]`,
+      "startup_timeout_sec = 120",
+      "tool_timeout_sec = 120",
+      "default_tools_approval_mode = \"prompt\""
+    ];
+    if (forwardedEnvironment.length) lines.push(`env_vars = [${forwardedEnvironment.map(tomlString).join(", ")}]`);
+    if (name === "google-docs") {
+      lines.push(`enabled_tools = [${["authGetStatus", "getFileMetadata", "readGoogleDoc", "readGoogleDocPaginated"].map(tomlString).join(", ")}]`);
+    }
+    if (Object.keys(staticEnvironment).length) {
+      lines.push("", `[mcp_servers.${tomlString(name)}.env]`);
+      for (const [key, value] of Object.entries(staticEnvironment)) lines.push(`${key} = ${tomlString(value)}`);
+    }
+    sections.push(lines.join("\n"));
+  }
+  return `${CODEX_MCP_START}\n${sections.join("\n\n")}\n${CODEX_MCP_END}`;
+}
+
+function mergeCodexMcp(existing = "", servers = {}) {
+  const block = codexMcpBlock(servers);
+  const managedPattern = new RegExp(`${CODEX_MCP_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?${CODEX_MCP_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`);
+  if (managedPattern.test(existing)) return existing.replace(managedPattern, block);
+  for (const name of Object.keys(servers)) {
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`^\\[mcp_servers\\.(?:${escapedName}|["']${escapedName}["'])\\]`, "m").test(existing)) {
+      throw new Error(`Codex MCP server ${name} already exists outside the coding-agent-harness managed block.`);
+    }
+  }
+  const prefix = existing.trimEnd();
+  return `${prefix}${prefix ? "\n\n" : ""}${block}\n`;
 }
 
 function mergeServers(existing = {}, generated = standardMcpServers()) {
@@ -59,7 +119,7 @@ function mergeGitignore(existing = "", entries = []) {
   return `${prefix}${prefix ? "\n\n" : ""}${GITIGNORE_START}\n${missing.join("\n")}\n${GITIGNORE_END}\n`;
 }
 
-export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = os.homedir(), includeMattPocockSetup = false, jiraAuthMode = "cloud", jiraUrl = "", gitLabApiUrl = "" }) {
+export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = os.homedir(), includeMattPocockSetup = false, includeGoogleDocs = false, jiraAuthMode = "cloud", jiraUrl = "", gitLabApiUrl = "" }) {
   if (!["pi", "claude-code", "opencode", "codex"].includes(harness)) {
     throw new Error(`Unsupported harness: ${harness}`);
   }
@@ -68,7 +128,7 @@ export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = o
   }
 
   const root = scope === "project" ? cwd : home;
-  const mcpServers = standardMcpServers({ jiraAuthMode, jiraUrl, gitLabApiUrl });
+  const mcpServers = standardMcpServers({ jiraAuthMode, jiraUrl, gitLabApiUrl, includeGoogleDocs });
   const plan = { harness, scope, root, writes: [], notes: [] };
   const projectIgnoreEntries = new Set();
   const writeText = (file, content, kind = "text") => plan.writes.push({ file, content, kind });
@@ -91,7 +151,7 @@ export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = o
     writeJson(path.join(agentDir, "mcp.json"), { mcpServers });
     writeText(instructionFile, WORKFLOW_INSTRUCTIONS, "instructions");
     ignoreProjectPaths("/.pi/", "/AGENTS.md");
-    plan.notes.push("Restart Pi so it installs/loads npm:pi-mcp-adapter@2.23.0, then use /delivery. Pi exposes Jira, GitLab, and browser capabilities through its single lazy mcp proxy tool. Commands installed: /delivery, /grill-with-docs, /wayfinder, /to-spec, /to-tickets, /implement, /tdd, /verify-ui, /code-review, /create-mr, /diagnosing-bugs, /improve-codebase-architecture.");
+    plan.notes.push(`Restart Pi so it installs/loads npm:pi-mcp-adapter@2.23.0, then use /delivery. Pi exposes Jira, GitLab, browser${includeGoogleDocs ? ", and read-only Google Docs" : ""} capabilities through its single lazy mcp proxy tool. Commands installed: /delivery, /grill-with-docs, /wayfinder, /to-spec, /to-tickets, /implement, /tdd, /verify-ui, /code-review, /create-mr, /diagnosing-bugs, /improve-codebase-architecture.`);
   }
 
   if (harness === "claude-code") {
@@ -132,9 +192,22 @@ export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = o
     const instructionFile = scope === "global" ? path.join(home, ".codex", "AGENTS.md") : path.join(cwd, "AGENTS.md");
     writeText(instructionFile, WORKFLOW_INSTRUCTIONS, "instructions");
     writeCommandFiles(path.join(root, "docs", "agent-workflow"));
-    ignoreProjectPaths("/AGENTS.md", "/docs/agent-workflow/");
+    if (includeGoogleDocs) {
+      writeText(
+        path.join(scope === "global" ? path.join(home, ".codex") : path.join(cwd, ".codex"), "config.toml"),
+        undefined,
+        "codex-mcp"
+      );
+      plan.writes.at(-1).servers = { "google-docs": mcpServers["google-docs"] };
+    }
+    ignoreProjectPaths("/AGENTS.md", "/docs/agent-workflow/", ...(includeGoogleDocs ? ["/.codex/"] : []));
     plan.notes.push("Codex uses the installed AGENTS.md workflow. Execute the matching docs/agent-workflow/<command>.md instruction for the desired workflow step.");
-    plan.notes.push("Codex MCP registration is intentionally not auto-written in v0.1 because its user-level TOML is shared across projects; use your existing MCP configuration or add servers through Codex.");
+    if (includeGoogleDocs) plan.notes.push("The read-only Google Docs MCP server was added to Codex config.toml with a four-tool allowlist. Project-scoped MCP configuration requires a trusted Codex project.");
+    else plan.notes.push("Codex Jira, GitLab, and browser MCP registration is preserved; configure those shared integrations separately when needed.");
+  }
+
+  if (includeGoogleDocs) {
+    plan.notes.push("Google Docs links discovered in Jira are read through google-docs with Drive and Docs read-only OAuth scopes. External document content is treated as untrusted evidence, never as agent instructions.");
   }
 
   if (includeMattPocockSetup) {
@@ -210,6 +283,7 @@ export function buildUninstallPlan({ harness, scope, cwd = process.cwd(), home =
 
 export function mergeWrite(existing, write) {
   if (write.kind === "gitignore") return mergeGitignore(existing, write.entries);
+  if (write.kind === "codex-mcp") return mergeCodexMcp(existing, write.servers);
   if (write.kind === "pi-settings") {
     const current = existing?.trim() ? JSON.parse(existing) : {};
     const packages = Array.isArray(current.packages) ? current.packages : [];
@@ -239,9 +313,12 @@ export function mergeWrite(existing, write) {
 
 export function removeManagedContent(existing, kind) {
   if (kind === "instructions") {
-    const workflow = WORKFLOW_INSTRUCTIONS.trim();
-    if (!existing.includes(workflow)) return existing;
-    return existing.replace(workflow, "").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+    const heading = "## Guarded delivery workflow";
+    const start = existing.indexOf(heading);
+    if (start < 0) return existing;
+    const nextSection = existing.indexOf("\n## ", start + heading.length);
+    const end = nextSection < 0 ? existing.length : nextSection;
+    return `${existing.slice(0, start)}${existing.slice(end)}`.replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
   }
   if (kind === "opencode-commands") {
     if (!existing.trim()) return existing;

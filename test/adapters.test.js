@@ -9,11 +9,13 @@ import {
   buildInstallPlan,
   buildUninstallPlan,
   MATT_POCOCK_WORKFLOW_SKILLS,
+  googleDocsAuthInstaller,
   mattPocockSkillsInstallArgs,
   mattPocockSkillsInstaller,
   inferJiraAuthMode,
   mergeWrite,
   normalizeGitLabApiUrl,
+  resolveUserPath,
   removeManagedContent
 } from "../src/index.js";
 
@@ -103,6 +105,62 @@ test("Matt Pocock installation also bootstraps repository configuration without 
   assert.ok(gitignore.entries.includes("/.agents/"));
   assert.ok(gitignore.entries.includes("/skills-lock.json"));
   assert.ok(gitignore.entries.includes("/docs/agents/"));
+});
+
+test("Google Docs opt-in emits a pinned read-only MCP server", () => {
+  const piPlan = buildInstallPlan({
+    harness: "pi",
+    scope: "project",
+    cwd: "C:/repo",
+    home: "C:/user",
+    includeGoogleDocs: true
+  });
+  const piConfig = piPlan.writes.find((write) => write.file.endsWith("mcp.json")).value;
+  const googleDocs = piConfig.mcpServers["google-docs"];
+  assert.deepEqual(googleDocs.args, ["-y", "@piotr-agier/google-drive-mcp@2.5.0"]);
+  assert.equal(googleDocs.env.GOOGLE_DRIVE_OAUTH_CREDENTIALS, "${GOOGLE_DRIVE_OAUTH_CREDENTIALS}");
+  assert.equal(googleDocs.env.GOOGLE_DRIVE_MCP_SCOPES, "https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/documents.readonly");
+  assert.ok(piPlan.writes.find((write) => write.file.endsWith("delivery.md")).content.includes("untrusted data"));
+
+  const openCodePlan = buildInstallPlan({
+    harness: "opencode",
+    scope: "project",
+    cwd: "C:/repo",
+    home: "C:/user",
+    includeGoogleDocs: true
+  });
+  const openCodeConfig = openCodePlan.writes.find((write) => write.file.endsWith("opencode.json")).value;
+  assert.equal(openCodeConfig.mcp["google-docs"].environment.GOOGLE_DRIVE_OAUTH_CREDENTIALS, "{env:GOOGLE_DRIVE_OAUTH_CREDENTIALS}");
+  assert.equal(openCodeConfig.mcp["google-docs"].disabled, false);
+});
+
+test("Codex Google Docs MCP merge is project-scoped, additive, and idempotent", () => {
+  const plan = buildInstallPlan({
+    harness: "codex",
+    scope: "project",
+    cwd: "C:/repo",
+    home: "C:/user",
+    includeGoogleDocs: true
+  });
+  const write = plan.writes.find((item) => item.kind === "codex-mcp");
+  assert.equal(write.file.replaceAll("\\", "/"), "C:/repo/.codex/config.toml");
+  const once = mergeWrite("model = \"gpt-5\"\n", write);
+  const twice = mergeWrite(once, write);
+  assert.equal(twice, once);
+  assert.ok(once.includes("model = \"gpt-5\""));
+  assert.ok(once.includes('[mcp_servers."google-docs"]'));
+  assert.ok(once.includes('env_vars = ["GOOGLE_DRIVE_OAUTH_CREDENTIALS"]'));
+  assert.ok(once.includes('enabled_tools = ["authGetStatus", "getFileMetadata", "readGoogleDoc", "readGoogleDocPaginated"]'));
+  assert.ok(once.includes("https://www.googleapis.com/auth/documents.readonly"));
+  assert.ok(plan.writes.find((item) => item.kind === "gitignore").entries.includes("/.codex/"));
+});
+
+test("Google Docs OAuth command is Windows-safe and user paths expand", () => {
+  assert.deepEqual(googleDocsAuthInstaller({ platform: "win32" }), {
+    command: "cmd.exe",
+    args: ["/d", "/s", "/c", "npx -y @piotr-agier/google-drive-mcp@2.5.0 auth"]
+  });
+  assert.equal(resolveUserPath("~/.config/oauth.json", "C:/Users/example").replaceAll("\\", "/"), "C:/Users/example/.config/oauth.json");
 });
 
 test("Jira authentication mode is inferred and rendered for Cloud or Server/Data Center", () => {
@@ -217,6 +275,16 @@ test("instruction merge is idempotent", () => {
   assert.equal(twice, once);
 });
 
+test("instruction merge upgrades an older workflow block and preserves following user sections", () => {
+  const write = buildInstallPlan({ harness: "pi", scope: "project", cwd: "C:/repo", home: "C:/user" })
+    .writes.find((item) => item.kind === "instructions");
+  const existing = "# Existing\n\n## Guarded delivery workflow\n\nOld generated workflow.\n\n## Team rules\n\nKeep this.\n";
+  const merged = mergeWrite(existing, write);
+  assert.equal(merged.includes("Old generated workflow."), false);
+  assert.ok(merged.includes("When Jira contains Google Docs URLs"));
+  assert.ok(merged.includes("## Team rules\n\nKeep this."));
+});
+
 test("OpenCode merge upgrades managed commands while preserving unrelated commands", () => {
   const write = buildInstallPlan({ harness: "opencode", scope: "project", cwd: "C:/repo", home: "C:/user" })
     .writes.find((item) => item.file.endsWith("opencode.json"));
@@ -290,6 +358,12 @@ test("update upgrades an existing Pi workflow and preserves unrelated settings",
     assert.equal("JIRA_API_TOKEN" in mcp.mcpServers.jira.env, false);
     assert.equal(settings.theme, "custom");
     assert.deepEqual(settings.packages, ["npm:existing", "npm:pi-mcp-adapter@2.23.0"]);
+    const { stdout } = await execFileAsync(process.execPath, [cli, "update", "--harness", "pi", "--scope", "project", "--google-docs", "on", "--dry-run", "--yes"], {
+      cwd: workspace,
+      env: { ...process.env, JIRA_URL: "https://jira.gapit.com.vn", GITLAB_API_URL: "https://gitlab.gapit.com.vn/api/v4" }
+    });
+    assert.ok(stdout.includes("[dry-run] would update"));
+    assert.ok(stdout.includes(path.join(".pi", "mcp.json")));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -328,6 +402,34 @@ test("doctor --fix repairs a legacy Pi Jira Cloud/PAT mismatch", async () => {
     assert.deepEqual(Object.keys(mcp.mcpServers.jira.env).sort(), ["JIRA_PERSONAL_TOKEN", "JIRA_URL"]);
     assert.equal(mcp.mcpServers.jira.env.JIRA_PERSONAL_TOKEN, "${JIRA_PERSONAL_TOKEN}");
     assert.ok(settings.packages.includes("npm:pi-mcp-adapter@2.23.0"));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("doctor reads project-scoped Codex Google Docs TOML without treating it as JSON", async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), "coding-agent-harness-codex-doctor-"));
+  const cli = path.resolve("bin/coding-agent-harness.js");
+  try {
+    const plan = buildInstallPlan({ harness: "codex", scope: "project", cwd: workspace, home: workspace, includeGoogleDocs: true });
+    for (const write of plan.writes.filter((item) => item.kind !== "gitignore")) {
+      await mkdir(path.dirname(write.file), { recursive: true });
+      await writeFile(write.file, mergeWrite("", write), "utf8");
+    }
+    const credentials = path.join(workspace, "oauth.json");
+    const token = path.join(workspace, "tokens.json");
+    await writeFile(credentials, "{}", "utf8");
+    await writeFile(token, "{}", "utf8");
+    const { stdout } = await execFileAsync(process.execPath, [cli, "doctor", "--harness", "codex", "--scope", "project", "--yes"], {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        GOOGLE_DRIVE_OAUTH_CREDENTIALS: credentials,
+        GOOGLE_DRIVE_MCP_TOKEN_PATH: token
+      }
+    });
+    assert.ok(stdout.includes("Installation: codex (project)"));
+    assert.equal(stdout.includes("Cannot read"), false);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
