@@ -163,7 +163,7 @@ The test suite covers adapter plans, non-destructive MCP merges, idempotent inst
 
 Every push to `main` runs [`.github/workflows/publish.yml`](./.github/workflows/publish.yml). After tests and the package-content check pass, `semantic-release` derives the next semantic version from Conventional Commit messages, updates `package.json` and `package-lock.json`, creates a Git tag and GitHub Release, then publishes to npm.
 
-Create a repository secret named `NPM_TOKEN`. It must be an npm granular access token with **read and write** access to `@hopkienne/coding-agent-harness`; when npm 2FA is enabled, also enable **Bypass 2FA** for this CI token. Never put the token in the repository or a workflow file.
+Create a repository secret named `NPM_TOKEN`. It must be an npm granular access token with **read and write** access to `@hopkienne/coding-agent-harness`; when npm 2FA is enabled, also enable **Bypass 2FA** for this CI token. Paste only the token value—without quotes, whitespace, or a line break. Never put the token in the repository or a workflow file.
 
 | Commit format | Automatic result |
 | --- | --- |
