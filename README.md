@@ -156,13 +156,35 @@ The test suite covers adapter plans, non-destructive MCP merges, idempotent inst
 └── test/         # Node.js test suite
 ```
 
-## Publishing checklist
+## Publishing from GitHub Actions
 
-1. Create `hopkienne/coding-agent-harness` on GitHub and add it as `origin`.
-2. Review the version and package contents with `npm pack --dry-run`.
-3. Authenticate with the npm account that owns the `@hopkienne` scope.
-4. Publish with `npm publish --access public`.
-5. Test from a fresh project using `npx @hopkienne/coding-agent-harness init`.
+Publishing is tag-driven through [`.github/workflows/publish.yml`](./.github/workflows/publish.yml). The workflow tests, checks the package contents, verifies that the tag matches `package.json`, and publishes with npm provenance.
+
+### First release bootstrap
+
+1. Create the public GitHub repository `hopkienne/coding-agent-harness`, add it as `origin`, and push `main`.
+2. In npm, create a **granular** token with package publish permission and **bypass 2FA** enabled. Add it to the GitHub repository as the `NPM_TOKEN` Actions secret. This is only a bootstrap credential.
+3. Create and push the release tag:
+
+   ```bash
+   git tag v0.1.0
+   git push origin main --tags
+   ```
+
+4. Confirm that the GitHub Actions `Publish npm package` run succeeds and that `https://www.npmjs.com/package/@hopkienne/coding-agent-harness` is public.
+
+### Switch to trusted publishing
+
+After the first publish, configure npm **Trusted Publishing** for GitHub Actions in the package settings:
+
+```text
+Organization/user: hopkienne
+Repository: coding-agent-harness
+Workflow filename: publish.yml
+Allowed action: npm publish
+```
+
+The workflow already grants `id-token: write`, so npm can use OIDC and generate provenance without a long-lived token. Run one release through Trusted Publishing, then delete the `NPM_TOKEN` GitHub secret. You can additionally set the npm package to require 2FA and disallow traditional tokens.
 
 ## License
 

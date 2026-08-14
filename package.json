@@ -19,7 +19,8 @@
   },
   "scripts": {
     "test": "node --test",
-    "start": "node bin/coding-agent-harness.js"
+    "start": "node bin/coding-agent-harness.js",
+    "prepublishOnly": "npm test"
   },
   "keywords": [
     "coding-agent",
