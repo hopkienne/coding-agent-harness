@@ -3,11 +3,47 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { PassThrough } from "node:stream";
 import path from "node:path";
 import { promisify } from "node:util";
-import { buildInstallPlan, mergeWrite } from "../src/index.js";
+import { askSecret, buildInstallPlan, mergeWrite, select } from "../src/index.js";
 
 const execFileAsync = promisify(execFile);
+
+function interactiveStreams() {
+  const input = new PassThrough();
+  input.isTTY = true;
+  input.isRaw = false;
+  input.setRawMode = (value) => { input.isRaw = value; };
+  const output = new PassThrough();
+  output.isTTY = true;
+  return { input, output };
+}
+
+test("interactive menus support arrow keys and Enter", async () => {
+  const terminal = interactiveStreams();
+  const answer = select("Choose a harness", [
+    { value: "pi", label: "Pi" },
+    { value: "opencode", label: "OpenCode" }
+  ], "pi", terminal);
+  terminal.input.emit("keypress", "", { name: "down" });
+  terminal.input.emit("keypress", "", { name: "return" });
+  assert.equal(await answer, "opencode");
+});
+
+test("secret prompts mask input without private readline APIs", async () => {
+  const terminal = interactiveStreams();
+  let screen = "";
+  terminal.output.on("data", (chunk) => { screen += chunk.toString(); });
+  const answer = askSecret("API token", terminal);
+  terminal.input.emit("keypress", "a", { name: "a" });
+  terminal.input.emit("keypress", "b", { name: "b" });
+  terminal.input.emit("keypress", "c", { name: "c" });
+  terminal.input.emit("keypress", "", { name: "return" });
+  assert.equal(await answer, "abc");
+  assert.match(screen, /\*\*\*/);
+  assert.doesNotMatch(screen, /abc/);
+});
 
 test("Pi project plan installs a delivery prompt, MCP config, and instructions", () => {
   const plan = buildInstallPlan({ harness: "pi", scope: "project", cwd: "C:/repo", home: "C:/user" });

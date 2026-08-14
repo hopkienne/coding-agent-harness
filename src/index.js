@@ -4,10 +4,24 @@ import process from "node:process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createInterface } from "node:readline/promises";
+import { emitKeypressEvents } from "node:readline";
 import { buildInstallPlan, mergeWrite } from "./adapters.js";
 
 const execFileAsync = promisify(execFile);
-const HARNESS_CHOICES = ["pi", "claude-code", "codex", "opencode"];
+const HARNESS_CHOICES = [
+  { value: "pi", label: "Pi" },
+  { value: "claude-code", label: "Claude Code" },
+  { value: "codex", label: "Codex" },
+  { value: "opencode", label: "OpenCode" }
+];
+const SCOPE_CHOICES = [
+  { value: "project", label: "Project (current repository)" },
+  { value: "global", label: "Global (all projects)" }
+];
+const SECRET_CHOICES = [
+  { value: "yes", label: "Yes — configure Jira and GitLab now" },
+  { value: "no", label: "No — configure environment variables later" }
+];
 
 function help() {
   return `Usage: coding-agent-harness <command> [options]
@@ -27,7 +41,7 @@ Options for init:
 function parseArgs(argv) {
   const [command = "help", ...rest] = argv;
   if (command === "--help" || command === "-h") return { command: "help", help: true };
-  const options = { command, scope: "project", dryRun: false, yes: false };
+  const options = { command, dryRun: false, yes: false };
   for (let index = 0; index < rest.length; index += 1) {
     const item = rest[index];
     if (item === "--dry-run") options.dryRun = true;
@@ -51,35 +65,108 @@ async function ask(question, fallback) {
   }
 }
 
-async function askSecret(question) {
-  if (!process.stdin.isTTY) return ask(question);
-  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-  const write = rl._writeToOutput.bind(rl);
-  let masking = false;
-  rl._writeToOutput = (text) => {
-    if (masking && text.trim()) rl.output.write("*");
-    else write(text);
-  };
-  try {
-    process.stdout.write(`${question}: `);
-    masking = true;
-    return (await rl.question("")).trim();
-  } finally {
-    masking = false;
-    rl.close();
-  }
+function isInteractiveTerminal(input = process.stdin, output = process.stdout) {
+  return Boolean(input.isTTY && output.isTTY && typeof input.setRawMode === "function");
+}
+
+function renderSelect(question, choices, selected) {
+  return [
+    question,
+    "Use ↑/↓ to choose, then Enter.",
+    ...choices.map((choice, index) => `${index === selected ? "❯" : " "} ${choice.label}`)
+  ].join("\n");
+}
+
+async function select(question, choices, fallback, { input = process.stdin, output = process.stdout } = {}) {
+  const initial = Math.max(0, choices.findIndex((choice) => choice.value === fallback));
+  if (!isInteractiveTerminal(input, output)) return choices[initial].value;
+  const wasRaw = input.isRaw;
+  let selected = initial;
+  let renderedLines = 0;
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      input.off("keypress", onKeypress);
+      input.setRawMode(Boolean(wasRaw));
+      input.pause();
+    };
+    const render = () => {
+      if (renderedLines) output.write(`\x1B[${renderedLines}A\r\x1B[0J`);
+      const screen = renderSelect(question, choices, selected);
+      output.write(`${screen}\n`);
+      renderedLines = screen.split("\n").length;
+    };
+    const onKeypress = (character, key = {}) => {
+      if (key.ctrl && key.name === "c") {
+        cleanup();
+        reject(new Error("Installation cancelled."));
+      } else if (key.name === "up") {
+        selected = (selected - 1 + choices.length) % choices.length;
+        render();
+      } else if (key.name === "down") {
+        selected = (selected + 1) % choices.length;
+        render();
+      } else if (key.name === "return" || key.name === "enter") {
+        cleanup();
+        resolve(choices[selected].value);
+      }
+    };
+
+    emitKeypressEvents(input);
+    input.setRawMode(true);
+    input.resume();
+    input.on("keypress", onKeypress);
+    render();
+  });
+}
+
+async function askSecret(question, { input = process.stdin, output = process.stdout } = {}) {
+  if (!isInteractiveTerminal(input, output)) return ask(question);
+  const wasRaw = input.isRaw;
+  let value = "";
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      input.off("keypress", onKeypress);
+      input.setRawMode(Boolean(wasRaw));
+      input.pause();
+    };
+    const onKeypress = (character, key = {}) => {
+      if (key.ctrl && key.name === "c") {
+        cleanup();
+        reject(new Error("Installation cancelled."));
+      } else if (key.name === "return" || key.name === "enter") {
+        output.write("\n");
+        cleanup();
+        resolve(value.trim());
+      } else if (key.name === "backspace") {
+        if (value) {
+          value = value.slice(0, -1);
+          output.write("\b \b");
+        }
+      } else if (character && !key.ctrl && !key.meta) {
+        value += character;
+        output.write("*");
+      }
+    };
+
+    output.write(`${question}: `);
+    emitKeypressEvents(input);
+    input.setRawMode(true);
+    input.resume();
+    input.on("keypress", onKeypress);
+  });
 }
 
 async function collectOptions(options) {
   if (options.yes) {
     if (!options.harness) throw new Error("--yes requires --harness.");
-    return options;
+    return { ...options, scope: options.scope ?? "project" };
   }
-  const harness = options.harness ?? await ask(`Harness (${HARNESS_CHOICES.join(", ")})`, "pi");
-  if (!HARNESS_CHOICES.includes(harness)) throw new Error(`Choose one of: ${HARNESS_CHOICES.join(", ")}`);
-  const scope = await ask("Install scope (project, global)", options.scope);
-  if (!["project", "global"].includes(scope)) throw new Error("Scope must be project or global.");
-  const configureSecrets = await ask("Configure Jira/GitLab environment variables now? (yes, no)", "yes");
+  const harness = options.harness ?? await select("Choose a coding-agent harness", HARNESS_CHOICES, "pi");
+  if (!HARNESS_CHOICES.some((choice) => choice.value === harness)) throw new Error("Choose pi, claude-code, codex, or opencode.");
+  const scope = options.scope ?? await select("Choose where to install the workflow", SCOPE_CHOICES, "project");
+  const configureSecrets = await select("Configure Jira/GitLab environment variables now?", SECRET_CHOICES, "yes");
   const secrets = configureSecrets === "yes" ? {
     JIRA_URL: await ask("Jira URL"),
     JIRA_USERNAME: await ask("Jira username/email"),
@@ -141,4 +228,4 @@ export async function main(argv) {
   throw new Error(`Unknown command: ${options.command}`);
 }
 
-export { buildInstallPlan, mergeWrite };
+export { askSecret, buildInstallPlan, mergeWrite, select };

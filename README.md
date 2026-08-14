@@ -52,12 +52,15 @@ After the package is published to npm, run this from the project you want to con
 npx @hopkienne/coding-agent-harness init
 ```
 
-The interactive installer asks for the target harness, installation scope, and optional Jira/GitLab environment variables.
+The interactive installer presents keyboard menus for the target harness, installation scope, and whether to configure Jira/GitLab variables. Use <kbd>↑</kbd>/<kbd>↓</kbd> and <kbd>Enter</kbd>; text and secret fields are entered normally.
 
 ```text
-Harness (pi, claude-code, codex, opencode) [pi]: opencode
-Install scope (project, global) [project]: project
-Configure Jira/GitLab environment variables now? (yes, no) [yes]: yes
+Choose a coding-agent harness
+Use ↑/↓ to choose, then Enter.
+  Pi
+  Claude Code
+  Codex
+❯ OpenCode
 ```
 
 Then start a delivery:
@@ -68,7 +71,7 @@ Then start a delivery:
 
 The agent reads the Jira issue, begins the grill, and asks exactly one material question at a time. It advances automatically after the decision is clear.
 
-> **Before npm publish:** run the local CLI directly:
+> **When developing this repository:** run the local CLI directly. Do not use `npx @hopkienne/coding-agent-harness` from inside this source directory, because npm resolves the local project before the published executable:
 >
 > ```powershell
 > node .\bin\coding-agent-harness.js init
