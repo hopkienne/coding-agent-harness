@@ -9,6 +9,7 @@ import {
   buildInstallPlan,
   buildUninstallPlan,
   mattPocockSkillsInstallArgs,
+  mattPocockSkillsInstaller,
   mergeWrite,
   normalizeGitLabApiUrl,
   removeManagedContent
@@ -48,6 +49,10 @@ test("all Matt Pocock skills are copied only for the selected harness and scope"
     "--yes", "skills@latest", "add", "mattpocock/skills", "--skill", "*", "--agent", "opencode", "--yes", "--copy"
   ]);
   assert.deepEqual(mattPocockSkillsInstallArgs({ harness: "pi", scope: "global" }).slice(-2), ["--copy", "--global"]);
+  assert.deepEqual(mattPocockSkillsInstaller({ harness: "opencode", scope: "project", platform: "win32" }), {
+    command: "cmd.exe",
+    args: ["/d", "/s", "/c", "npx \"--yes\" \"skills@latest\" \"add\" \"mattpocock/skills\" \"--skill\" \"*\" \"--agent\" \"opencode\" \"--yes\" \"--copy\""]
+  });
 });
 
 test("Matt Pocock installation also bootstraps repository configuration without overwriting it", () => {

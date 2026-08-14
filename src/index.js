@@ -142,12 +142,22 @@ export function mattPocockSkillsInstallArgs({ harness, scope }) {
   return args;
 }
 
+export function mattPocockSkillsInstaller({ harness, scope, platform = process.platform }) {
+  const args = mattPocockSkillsInstallArgs({ harness, scope });
+  if (platform !== "win32") return { command: "npx", args };
+  return {
+    command: "cmd.exe",
+    args: ["/d", "/s", "/c", `npx ${args.map((argument) => `"${argument}"`).join(" ")}`]
+  };
+}
+
 async function installMattPocockSkills({ harness, scope }) {
-  const npx = process.platform === "win32" ? "npx.cmd" : "npx";
-  await execFileAsync(npx, mattPocockSkillsInstallArgs({ harness, scope }), {
+  const installer = mattPocockSkillsInstaller({ harness, scope });
+  await execFileAsync(installer.command, installer.args, {
     cwd: process.cwd(),
     windowsHide: true,
-    maxBuffer: 5 * 1024 * 1024
+    maxBuffer: 5 * 1024 * 1024,
+    timeout: 5 * 60 * 1000
   });
 }
 
@@ -222,6 +232,7 @@ async function collectUninstallOptions(options) {
 
 async function init(options) {
   const interactive = !options.yes && process.stdout.isTTY;
+  let progress;
   if (interactive) {
     prompts.intro("Coding Agent Harness");
     prompts.note("A human-gated delivery workflow for Jira → architecture grill → GitLab → verified delivery.", "Install a delivery system, not just a prompt");
@@ -239,7 +250,7 @@ async function init(options) {
       prompts.note(`Harness: ${selected.harness}\nScope: ${selected.scope}\nFiles: ${new Set(plan.writes.map((write) => write.file)).size}\nMatt Pocock skills: ${selected.installMattPocockSkills ? "all skills will be copied" : "not selected"}\nGitLab writes: none until you explicitly approve them.`, "Ready to install");
     }
 
-    const progress = interactive ? prompts.spinner() : undefined;
+    progress = interactive ? prompts.spinner() : undefined;
     progress?.start(selected.dryRun ? "Preparing installation preview" : "Installing delivery workflow");
     const files = await applyPlan(plan, selected.dryRun);
     progress?.stop(selected.dryRun ? "Preview ready" : "Workflow files installed");
@@ -247,7 +258,7 @@ async function init(options) {
 
     let installedMattPocockSkills = false;
     if (selected.installMattPocockSkills && !selected.dryRun) {
-      progress?.start("Copying original Matt Pocock skills");
+      progress?.start("Copying original Matt Pocock skills (may take a few minutes)");
       await installMattPocockSkills(selected);
       installedMattPocockSkills = true;
       progress?.stop("Original Matt Pocock skills copied");
@@ -275,6 +286,8 @@ async function init(options) {
     }
   } catch (error) {
     if (error instanceof InstallationCancelled) return;
+    progress?.stop("Installation stopped");
+    if (error.killed) error.message = "Copying original Matt Pocock skills timed out after five minutes. Check your network, upgrade to Node.js 22.20 or newer, then run init again.";
     if (interactive) prompts.cancel(`Installation failed: ${error.message}`);
     throw error;
   }
