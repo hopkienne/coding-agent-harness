@@ -87,17 +87,45 @@ function defineCommand(description, argumentHint, template, { preferMattPocockSk
   };
 }
 
+export function commandTemplateForHarness(command, harness) {
+  if (harness === "pi") return command.template.replaceAll("$ARGUMENTS", "$@");
+  if (harness === "codex") {
+    return command.template.replaceAll(
+      "$ARGUMENTS",
+      "the complete natural-language request provided by the human alongside this workflow instruction"
+    );
+  }
+  return command.template;
+}
+
+export function commandMarkdownForHarness(command, harness) {
+  return `---\ndescription: ${command.description}\nargument-hint: "${command.argumentHint}"\n---\n${commandTemplateForHarness(command, harness)}\n`;
+}
+
 export const WORKFLOW_COMMANDS = {
   delivery: defineCommand(
     "Orchestrate the complete guarded Jira-to-GitLab delivery workflow",
-    "<JIRA-KEY> [group/project]",
-    `You are the delivery orchestrator for Jira $1. Use $2 as the GitLab project path when supplied; otherwise inspect the current repository's git remote and infer the full namespace/project path, preserving nested subgroups and removing the host and trailing .git. Ask the human for the path only when no unambiguous GitLab remote exists. Execute this workflow in the current conversation; do not ask the human to invoke other slash commands.
+    "<request containing a JIRA-KEY and optional instructions>",
+    `You are the delivery orchestrator.
+
+Full user request:
+$ARGUMENTS
+
+Interpret the complete request before taking action:
+
+- Extract exactly one Jira issue key matching the usual PROJECT-123 form, wherever it appears in the request. Never assume the first word is the Jira key.
+- Treat a value as an explicit GitLab project only when the human identifies it as such or it clearly has a namespace/project form. Otherwise inspect the current repository's git remote and infer the full namespace/project path, preserving nested subgroups and removing the host and trailing .git. Ask only when no unambiguous GitLab remote exists.
+- Detect and follow explicit communication preferences, including the requested response language, for the entire workflow.
+- Preserve the remaining text as delivery constraints or additional instructions unless it conflicts with the guarded workflow and human-approval rules.
+- If no Jira key is present, ask for it. If multiple Jira keys are present and the intended primary issue is ambiguous, ask which one to use. Do not begin delivery with a guessed key.
+
+Use the extracted Jira key as JIRA_KEY throughout. Execute this workflow in the current conversation; do not ask the human to invoke other slash commands.
 
 Maintain a compact phase ledger in every response: phase, evidence, next action, and human decision needed.
 
 1. Read Jira, linked requirements, repository context, contracts, ADRs, and existing specs.
 2. Run the architecture grill and resolve one material ambiguity at a time.
-3. Update CONTEXT.md, focused ADRs, and docs/specs/$1.md with traced acceptance criteria, contracts, tests, rollout, and risks.
+3. Update CONTEXT.md, focused ADRs, and docs/specs/<JIRA_KEY>.md (replacing the placeholder with the extracted key) with traced acceptance criteria, contracts, tests, rollout, and risks.
 4. Propose small GitLab tickets and obtain explicit confirmation immediately before any GitLab write.
 5. Implement approved tickets with RED → GREEN → refactor. Verify UI acceptance criteria through Chrome DevTools when relevant.
 6. Review against Jira/spec/ADRs, present an MR preview, and obtain explicit confirmation before creating the GitLab merge request.
@@ -205,7 +233,7 @@ Use the installed Jira → architecture → spec → GitLab → TDD/UI verificat
 
 ### Installed commands
 
-- \`/delivery <JIRA-KEY> [group/project]\` — run the end-to-end guarded workflow; infer the GitLab project from the remote when omitted.
+- \`/delivery <request containing a JIRA-KEY and optional instructions>\` — run the end-to-end guarded workflow from either concise arguments or a natural-language request; infer the GitLab project from the remote when omitted.
 - \`/grill-with-docs <JIRA-KEY>\` — resolve ambiguity and write durable decisions.
 - \`/wayfinder <area>\` — map a large or unfamiliar initiative into investigations.
 - \`/to-spec <JIRA-KEY>\` — create the traced implementation spec.

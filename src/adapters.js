@@ -6,6 +6,8 @@ import {
   MATT_POCOCK_SETUP_FILES,
   WORKFLOW_COMMANDS,
   WORKFLOW_INSTRUCTIONS,
+  commandMarkdownForHarness,
+  commandTemplateForHarness,
   standardMcpServers
 } from "./workflow.js";
 
@@ -23,6 +25,22 @@ function mergeServers(existing = {}) {
   return { ...standardMcpServers(), ...existing };
 }
 
+const GITIGNORE_START = "# >>> coding-agent-harness >>>";
+const GITIGNORE_END = "# <<< coding-agent-harness <<<";
+
+function mergeGitignore(existing = "", entries = []) {
+  const existingEntries = new Set(existing.split(/\r?\n/).map((line) => line.trim()));
+  const missing = [...new Set(entries)].filter((entry) => !existingEntries.has(entry));
+  if (missing.length === 0) return existing;
+
+  if (existing.includes(GITIGNORE_START) && existing.includes(GITIGNORE_END)) {
+    return existing.replace(GITIGNORE_END, `${missing.join("\n")}\n${GITIGNORE_END}`);
+  }
+
+  const prefix = existing.trimEnd();
+  return `${prefix}${prefix ? "\n\n" : ""}${GITIGNORE_START}\n${missing.join("\n")}\n${GITIGNORE_END}\n`;
+}
+
 export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = os.homedir(), includeMattPocockSetup = false }) {
   if (!["pi", "claude-code", "opencode", "codex"].includes(harness)) {
     throw new Error(`Unsupported harness: ${harness}`);
@@ -33,11 +51,15 @@ export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = o
 
   const root = scope === "project" ? cwd : home;
   const plan = { harness, scope, root, writes: [], notes: [] };
+  const projectIgnoreEntries = new Set();
   const writeText = (file, content, kind = "text") => plan.writes.push({ file, content, kind });
   const writeJson = (file, value) => plan.writes.push({ file, value, kind: "json" });
+  const ignoreProjectPaths = (...entries) => {
+    if (scope === "project") for (const entry of entries) projectIgnoreEntries.add(entry);
+  };
   const writeCommandFiles = (commandDir) => {
     for (const [name, command] of Object.entries(WORKFLOW_COMMANDS)) {
-      writeText(path.join(commandDir, `${name}.md`), command.markdown);
+      writeText(path.join(commandDir, `${name}.md`), commandMarkdownForHarness(command, harness));
     }
   };
 
@@ -47,6 +69,7 @@ export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = o
     writeCommandFiles(path.join(agentDir, "prompts"));
     writeJson(path.join(agentDir, "mcp.json"), { mcpServers: standardMcpServers() });
     writeText(instructionFile, WORKFLOW_INSTRUCTIONS, "instructions");
+    ignoreProjectPaths("/.pi/", "/AGENTS.md");
     plan.notes.push("Restart Pi or run /reload. Commands installed: /delivery, /grill-with-docs, /wayfinder, /to-spec, /to-tickets, /implement, /tdd, /verify-ui, /code-review, /create-mr, /diagnosing-bugs, /improve-codebase-architecture.");
   }
 
@@ -56,6 +79,7 @@ export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = o
     writeCommandFiles(path.join(claudeDir, "commands"));
     writeJson(path.join(scope === "global" ? claudeDir : cwd, ".mcp.json"), { mcpServers: standardMcpServers() });
     writeText(instructionFile, WORKFLOW_INSTRUCTIONS, "instructions");
+    ignoreProjectPaths("/.claude/", "/.mcp.json", "/CLAUDE.md");
     plan.notes.push("Restart Claude Code. Commands installed: /delivery, /grill-with-docs, /wayfinder, /to-spec, /to-tickets, /implement, /tdd, /verify-ui, /code-review, /create-mr, /diagnosing-bugs, /improve-codebase-architecture.");
   }
 
@@ -66,7 +90,7 @@ export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = o
       $schema: "https://opencode.ai/config.json",
       command: Object.fromEntries(Object.entries(WORKFLOW_COMMANDS).map(([name, command]) => [name, {
         description: command.description,
-        template: command.template
+        template: commandTemplateForHarness(command, harness)
       }])),
       mcp: Object.fromEntries(Object.entries(standardMcpServers()).map(([name, server]) => [name, {
         type: "local",
@@ -76,6 +100,7 @@ export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = o
       }]))
     });
     writeText(path.join(configDir, "AGENTS.md"), WORKFLOW_INSTRUCTIONS, "instructions");
+    ignoreProjectPaths("/opencode.json", "/AGENTS.md");
     plan.notes.push("Restart OpenCode. Commands installed: /delivery, /grill-with-docs, /wayfinder, /to-spec, /to-tickets, /implement, /tdd, /verify-ui, /code-review, /create-mr, /diagnosing-bugs, /improve-codebase-architecture.");
   }
 
@@ -83,6 +108,7 @@ export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = o
     const instructionFile = scope === "global" ? path.join(home, ".codex", "AGENTS.md") : path.join(cwd, "AGENTS.md");
     writeText(instructionFile, WORKFLOW_INSTRUCTIONS, "instructions");
     writeCommandFiles(path.join(root, "docs", "agent-workflow"));
+    ignoreProjectPaths("/AGENTS.md", "/docs/agent-workflow/");
     plan.notes.push("Codex uses the installed AGENTS.md workflow. Execute the matching docs/agent-workflow/<command>.md instruction for the desired workflow step.");
     plan.notes.push("Codex MCP registration is intentionally not auto-written in v0.1 because its user-level TOML is shared across projects; use your existing MCP configuration or add servers through Codex.");
   }
@@ -95,7 +121,24 @@ export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = o
     for (const [name, content] of Object.entries(MATT_POCOCK_SETUP_FILES)) {
       writeText(path.join(cwd, "docs", "agents", name), content, "create-if-missing");
     }
+    if (scope === "project") {
+      ignoreProjectPaths(
+        `/${path.relative(cwd, skillInstructionFile).replaceAll("\\", "/")}`,
+        "/.agents/",
+        "/skills-lock.json",
+        "/docs/agents/"
+      );
+    }
     plan.notes.push("Matt Pocock engineering-skill configuration was bootstrapped for this repository: Jira requirements, GitLab delivery, triage labels, and domain-document conventions.");
+  }
+
+  if (scope === "project") {
+    plan.writes.push({
+      file: path.join(cwd, ".gitignore"),
+      kind: "gitignore",
+      entries: [...projectIgnoreEntries]
+    });
+    plan.notes.push("Project-local workflow artifacts were added to .gitignore so new generated files stay untracked.");
   }
 
   return plan;
@@ -142,6 +185,7 @@ export function buildUninstallPlan({ harness, scope, cwd = process.cwd(), home =
 }
 
 export function mergeWrite(existing, write) {
+  if (write.kind === "gitignore") return mergeGitignore(existing, write.entries);
   if (write.kind === "json") {
     const current = existing?.trim() ? JSON.parse(existing) : {};
     if (write.file.endsWith("opencode.json")) {
@@ -156,7 +200,7 @@ export function mergeWrite(existing, write) {
           disabled: withoutLegacyEnabled.disabled ?? (enabled === false)
         };
       }
-      return JSON.stringify({ ...current, ...write.value, command: { ...write.value.command, ...current.command }, mcp }, null, 2) + "\n";
+      return JSON.stringify({ ...current, ...write.value, command: { ...current.command, ...write.value.command }, mcp }, null, 2) + "\n";
     }
     return JSON.stringify({ ...current, mcpServers: mergeServers(current.mcpServers) }, null, 2) + "\n";
   }
