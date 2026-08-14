@@ -259,7 +259,7 @@ When Jira contains Google Docs URLs in its description, custom fields, comments,
 Keep durable decisions in CONTEXT.md, docs/adr/, and docs/specs/. Report exact verification results; never claim a test or UI check that was not run.
 `;
 
-export function standardMcpServers({ jiraAuthMode = "cloud", jiraUrl = "", gitLabApiUrl = "", includeGoogleDocs = false } = {}) {
+export function standardMcpServers({ jiraAuthMode = "cloud", jiraUrl = "", gitLabApiUrl = "", includeGoogleDocs = false, googleDocsAuthPort = 3000 } = {}) {
   if (!["cloud", "pat"].includes(jiraAuthMode)) throw new Error(`Unsupported Jira authentication mode: ${jiraAuthMode}`);
   const jiraEnv = jiraAuthMode === "pat"
     ? {
@@ -298,8 +298,8 @@ export function standardMcpServers({ jiraAuthMode = "cloud", jiraUrl = "", gitLa
       command: "npx",
       args: ["-y", GOOGLE_DRIVE_MCP_PACKAGE],
       env: {
-        GOOGLE_DRIVE_OAUTH_CREDENTIALS: "${GOOGLE_DRIVE_OAUTH_CREDENTIALS}",
-        GOOGLE_DRIVE_MCP_SCOPES: GOOGLE_DRIVE_READONLY_SCOPES
+        GOOGLE_DRIVE_MCP_SCOPES: GOOGLE_DRIVE_READONLY_SCOPES,
+        GOOGLE_DRIVE_MCP_AUTH_PORT: String(googleDocsAuthPort)
       },
       lifecycle: "lazy"
     };

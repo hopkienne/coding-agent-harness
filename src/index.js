@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import os from "node:os";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import * as prompts from "@clack/prompts";
 import { buildInstallPlan, buildUninstallPlan, mergeWrite, removeManagedContent } from "./adapters.js";
@@ -26,6 +26,7 @@ const SCOPE_CHOICES = [
 const MATT_POCOCK_SKILL_MODES = ["workflow", "all", "none"];
 const JIRA_AUTH_MODES = ["cloud", "pat"];
 const GOOGLE_DOCS_MODES = ["on", "off"];
+const GOOGLE_OAUTH_MODES = ["desktop-json", "web-client"];
 
 class InstallationCancelled extends Error {}
 
@@ -44,7 +45,11 @@ Options:
   --matt-pocock-skills <workflow|all|none> Default with --yes: none
   --jira-auth <cloud|pat>                  Default: inferred from JIRA_URL
   --google-docs <on|off>                   Default with --yes: off
+  --google-oauth-mode <desktop-json|web-client>
   --google-oauth-credentials <path>        OAuth Desktop credentials JSON
+  --google-client-id <id>                  Web application OAuth client ID
+  --google-client-secret <secret>          Web application OAuth client secret
+  --google-auth-port <port>                OAuth callback port range start; default: 3000
   --with-matt-pocock-skills                Alias for --matt-pocock-skills workflow
   --with-google-docs                       Alias for --google-docs on
   --skip-google-auth                       Configure MCP without opening OAuth now
@@ -70,7 +75,11 @@ function parseArgs(argv) {
     else if (item === "--matt-pocock-skills") options.mattPocockSkills = rest[++index];
     else if (item === "--jira-auth") options.jiraAuth = rest[++index];
     else if (item === "--google-docs") options.googleDocs = rest[++index];
+    else if (item === "--google-oauth-mode") options.googleOauthMode = rest[++index];
     else if (item === "--google-oauth-credentials") options.googleOauthCredentials = rest[++index];
+    else if (item === "--google-client-id") options.googleClientId = rest[++index];
+    else if (item === "--google-client-secret") options.googleClientSecret = rest[++index];
+    else if (item === "--google-auth-port") options.googleAuthPort = rest[++index];
     else if (item === "--harness" || item === "--scope") {
       options[item.slice(2)] = rest[++index];
     } else throw new Error(`Unknown option: ${item}`);
@@ -135,8 +144,156 @@ export function resolveUserPath(value = "", home = os.homedir()) {
   return path.resolve(input);
 }
 
+export function defaultGoogleCredentialsPath(home = os.homedir()) {
+  return path.join(home, ".config", "google-drive-mcp", "gcp-oauth.keys.json");
+}
+
 function defaultGoogleTokenPath(home = os.homedir()) {
   return path.join(home, ".config", "google-drive-mcp", "tokens.json");
+}
+
+function googleOAuthClientFromJson(value) {
+  return value?.installed ?? value?.web ?? value;
+}
+
+export function normalizeGoogleAuthPort(value = 3000) {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65531) {
+    throw new Error("Google OAuth callback port must be an integer between 1 and 65531.");
+  }
+  return port;
+}
+
+export function googleOAuthRedirectUris(port = 3000) {
+  const start = normalizeGoogleAuthPort(port);
+  return Array.from({ length: 5 }, (_, index) => `http://127.0.0.1:${start + index}/oauth2callback`);
+}
+
+async function writeGoogleDocsCredentials(raw, { home = os.homedir(), dryRun = false } = {}) {
+  const target = defaultGoogleCredentialsPath(home);
+  if (dryRun) return target;
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, raw, { encoding: "utf8", mode: 0o600 });
+  try { await fs.chmod(target, 0o600); } catch {}
+  return target;
+}
+
+export async function installGoogleDocsCredentials(sourcePath, { home = os.homedir(), dryRun = false } = {}) {
+  const source = resolveUserPath(sourcePath, home);
+  if (!source || !(await fileExists(source))) {
+    throw new Error(`Google OAuth credentials file was not found: ${source || sourcePath}`);
+  }
+  let raw;
+  let parsed;
+  try {
+    raw = await fs.readFile(source, "utf8");
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`Google OAuth credentials JSON is invalid: ${error.message}`);
+  }
+  const client = googleOAuthClientFromJson(parsed);
+  if (!client?.client_id || !client?.client_secret) {
+    throw new Error("Google OAuth credentials JSON must contain client_id and client_secret.");
+  }
+  const target = defaultGoogleCredentialsPath(home);
+  if (dryRun) return target;
+  if (path.resolve(source) === path.resolve(target)) {
+    try { await fs.chmod(target, 0o600); } catch {}
+    return target;
+  }
+  return writeGoogleDocsCredentials(raw, { home });
+}
+
+export async function installGoogleDocsWebClient({ clientId, clientSecret, authPort = 3000, home = os.homedir(), dryRun = false }) {
+  const normalizedClientId = String(clientId ?? "").trim();
+  const normalizedClientSecret = String(clientSecret ?? "").trim();
+  if (!normalizedClientId || !normalizedClientSecret) {
+    throw new Error("Web OAuth requires both Google client_id and client_secret.");
+  }
+  const credentials = {
+    web: {
+      client_id: normalizedClientId,
+      client_secret: normalizedClientSecret,
+      auth_uri: "https://accounts.google.com/o/oauth2/auth",
+      token_uri: "https://oauth2.googleapis.com/token",
+      redirect_uris: googleOAuthRedirectUris(authPort)
+    }
+  };
+  return writeGoogleDocsCredentials(`${JSON.stringify(credentials, null, 2)}\n`, { home, dryRun });
+}
+
+async function googleTokenSnapshot(file) {
+  try {
+    const raw = await fs.readFile(file, "utf8");
+    const parsed = JSON.parse(raw);
+    const accounts = parsed.accounts
+      ? Object.values(parsed.accounts)
+      : [parsed];
+    const usable = accounts.some((account) => account?.accessToken || account?.access_token || account?.refreshToken || account?.refresh_token);
+    return usable ? raw : "";
+  } catch {
+    return "";
+  }
+}
+
+async function collectGoogleOAuthInput(options, { interactive }) {
+  let mode = options.googleOauthMode
+    ?? ((options.googleClientId || options.googleClientSecret) ? "web-client" : "desktop-json");
+  if (interactive && !options.googleOauthMode) {
+    mode = unwrapPrompt(await prompts.select({
+      message: "Choose the Google OAuth client type",
+      options: [
+        { value: "desktop-json", label: "Desktop app JSON", hint: "Recommended — no redirect URI setup" },
+        { value: "web-client", label: "Web application", hint: "Enter client ID and secret; register loopback redirects" }
+      ],
+      initialValue: "desktop-json"
+    }));
+  }
+  if (!GOOGLE_OAUTH_MODES.includes(mode)) {
+    throw new Error("Choose desktop-json or web-client for --google-oauth-mode.");
+  }
+  const authPort = normalizeGoogleAuthPort(options.googleAuthPort ?? process.env.GOOGLE_DRIVE_MCP_AUTH_PORT ?? 3000);
+  if (mode === "web-client") {
+    if (interactive) {
+      prompts.note(googleOAuthRedirectUris(authPort).join("\n"), "Register these authorized redirect URIs in Google Cloud");
+    }
+    const clientId = String(options.googleClientId
+      ?? process.env.GOOGLE_DRIVE_MCP_CLIENT_ID
+      ?? (interactive ? unwrapPrompt(await prompts.text({ message: "Google OAuth web client ID" })) : "")).trim();
+    const clientSecret = String(options.googleClientSecret
+      ?? process.env.GOOGLE_DRIVE_MCP_CLIENT_SECRET
+      ?? (interactive ? unwrapPrompt(await prompts.password({ message: "Google OAuth web client secret", mask: "*" })) : "")).trim();
+    if ((!clientId || !clientSecret) && !options.dryRun) {
+      throw new Error("Web OAuth requires --google-client-id and --google-client-secret, or the matching environment variables.");
+    }
+    return { mode, clientId, clientSecret, authPort, credentialsPath: "" };
+  }
+
+  const configuredPath = resolveUserPath(
+    options.googleOauthCredentials ?? await readEnvironmentValue("GOOGLE_DRIVE_OAUTH_CREDENTIALS")
+  );
+  const conventionalPath = defaultGoogleCredentialsPath();
+  if (!interactive) {
+    const credentialsPath = configuredPath || ((await fileExists(conventionalPath)) ? conventionalPath : "");
+    if (options.dryRun) return { mode, credentialsPath: credentialsPath || conventionalPath, clientId: "", clientSecret: "", authPort };
+    if (!credentialsPath) throw new Error("Google Docs requires --google-oauth-credentials or GOOGLE_DRIVE_OAUTH_CREDENTIALS.");
+    if (!(await fileExists(credentialsPath))) throw new Error(`Google OAuth credentials file was not found: ${credentialsPath}`);
+    return { mode, credentialsPath, clientId: "", clientSecret: "", authPort };
+  }
+
+  let initialValue = configuredPath || ((await fileExists(conventionalPath)) ? conventionalPath : "");
+  while (true) {
+    const credentialsPath = resolveUserPath(unwrapPrompt(await prompts.text({
+      message: "Google OAuth Desktop credentials JSON",
+      placeholder: conventionalPath,
+      initialValue
+    })));
+    if (credentialsPath && await fileExists(credentialsPath)) {
+      return { mode, credentialsPath, clientId: "", clientSecret: "", authPort };
+    }
+    prompts.log.warn(`Credentials file was not found: ${credentialsPath || "(empty path)"}`);
+    initialValue = credentialsPath;
+  }
 }
 
 async function readEnvironmentValue(key) {
@@ -209,12 +366,17 @@ async function resolveInstalledConfiguration({ harness, scope, cwd = process.cwd
   if (harness === "codex") {
     const configText = await readText(configFile);
     const jiraUrl = await readEnvironmentValue("JIRA_URL");
+    const configuredGoogleCredentials = resolveUserPath(await readEnvironmentValue("GOOGLE_DRIVE_OAUTH_CREDENTIALS"), home);
+    const configuredGoogleAuthPort = configText.match(/^GOOGLE_DRIVE_MCP_AUTH_PORT\s*=\s*["'](\d+)["']/m)?.[1] ?? 3000;
     return {
       jiraAuthMode: jiraAuth ?? inferJiraAuthMode(jiraUrl),
       jiraUrl,
       gitLabApiUrl: normalizeGitLabApiUrl(await readEnvironmentValue("GITLAB_API_URL")),
       googleDocsEnabled: /^\[mcp_servers\.(?:google-docs|["']google-docs["'])\]/m.test(configText),
-      googleDocsCredentialsPath: resolveUserPath(await readEnvironmentValue("GOOGLE_DRIVE_OAUTH_CREDENTIALS"), home)
+      googleDocsCredentialsPath: configuredGoogleCredentials && await fileExists(configuredGoogleCredentials)
+        ? configuredGoogleCredentials
+        : defaultGoogleCredentialsPath(home),
+      googleDocsAuthPort: normalizeGoogleAuthPort(configuredGoogleAuthPort)
     };
   }
   const config = configFile ? await readJson(configFile) : {};
@@ -228,12 +390,16 @@ async function resolveInstalledConfiguration({ harness, scope, cwd = process.cwd
   const jiraAuthMode = jiraAuth
     ?? ("JIRA_PERSONAL_TOKEN" in jiraEnvironment ? "pat" : inferJiraAuthMode(jiraUrl));
   const googleDocsEnvironment = googleDocs?.environment ?? googleDocs?.env ?? {};
-  const googleDocsCredentialsPath = resolveUserPath(
+  const configuredGoogleCredentials = resolveUserPath(
     literalConfigValue(googleDocsEnvironment.GOOGLE_DRIVE_OAUTH_CREDENTIALS)
       || await readEnvironmentValue("GOOGLE_DRIVE_OAUTH_CREDENTIALS"),
     home
   );
-  return { jiraAuthMode, jiraUrl, gitLabApiUrl, googleDocsEnabled: Boolean(googleDocs), googleDocsCredentialsPath };
+  const googleDocsCredentialsPath = configuredGoogleCredentials && await fileExists(configuredGoogleCredentials)
+    ? configuredGoogleCredentials
+    : defaultGoogleCredentialsPath(home);
+  const googleDocsAuthPort = normalizeGoogleAuthPort(literalConfigValue(googleDocsEnvironment.GOOGLE_DRIVE_MCP_AUTH_PORT) || 3000);
+  return { jiraAuthMode, jiraUrl, gitLabApiUrl, googleDocsEnabled: Boolean(googleDocs), googleDocsCredentialsPath, googleDocsAuthPort };
 }
 
 async function collectOptions(options) {
@@ -245,22 +411,20 @@ async function collectOptions(options) {
     if (!JIRA_AUTH_MODES.includes(jiraAuthMode)) throw new Error("Choose cloud or pat for --jira-auth.");
     const googleDocs = options.googleDocs ?? "off";
     if (!GOOGLE_DOCS_MODES.includes(googleDocs)) throw new Error("Choose on or off for --google-docs.");
-    const googleDocsCredentialsPath = resolveUserPath(
-      options.googleOauthCredentials ?? await readEnvironmentValue("GOOGLE_DRIVE_OAUTH_CREDENTIALS")
-    );
-    if (googleDocs === "on" && !googleDocsCredentialsPath && !options.dryRun) {
-      throw new Error("Google Docs requires --google-oauth-credentials or GOOGLE_DRIVE_OAUTH_CREDENTIALS.");
-    }
-    if (googleDocs === "on" && googleDocsCredentialsPath && !(await fileExists(googleDocsCredentialsPath)) && !options.dryRun) {
-      throw new Error(`Google OAuth credentials file was not found: ${googleDocsCredentialsPath}`);
-    }
+    const googleOAuth = googleDocs === "on"
+      ? await collectGoogleOAuthInput(options, { interactive: false })
+      : { mode: "desktop-json", credentialsPath: "", clientId: "", clientSecret: "", authPort: 3000 };
     return {
       ...options,
       scope: options.scope ?? "project",
       mattPocockSkills,
       jiraAuthMode,
       googleDocsEnabled: googleDocs === "on",
-      googleDocsCredentialsPath
+      googleOauthMode: googleOAuth.mode,
+      googleDocsCredentialsPath: googleOAuth.credentialsPath,
+      googleClientId: googleOAuth.clientId,
+      googleClientSecret: googleOAuth.clientSecret,
+      googleAuthPort: googleOAuth.authPort
     };
   }
   const harness = options.harness ?? unwrapPrompt(await prompts.select({
@@ -292,20 +456,9 @@ async function collectOptions(options) {
     initialValue: "off"
   }))) === "on";
   if (options.googleDocs && !GOOGLE_DOCS_MODES.includes(options.googleDocs)) throw new Error("Choose on or off for --google-docs.");
-  let googleDocsCredentialsPath = "";
-  if (googleDocsEnabled) {
-    const configuredPath = resolveUserPath(
-      options.googleOauthCredentials ?? await readEnvironmentValue("GOOGLE_DRIVE_OAUTH_CREDENTIALS")
-    );
-    const conventionalPath = path.join(os.homedir(), ".config", "google-drive-mcp", "gcp-oauth.keys.json");
-    googleDocsCredentialsPath = resolveUserPath(unwrapPrompt(await prompts.text({
-      message: "Google OAuth Desktop credentials JSON",
-      placeholder: conventionalPath,
-      initialValue: configuredPath || ((await fileExists(conventionalPath)) ? conventionalPath : "")
-    })));
-    if (!googleDocsCredentialsPath) throw new Error("Google OAuth credentials path is required when Google Docs is enabled.");
-    if (!(await fileExists(googleDocsCredentialsPath))) throw new Error(`Google OAuth credentials file was not found: ${googleDocsCredentialsPath}`);
-  }
+  const googleOAuth = googleDocsEnabled
+    ? await collectGoogleOAuthInput(options, { interactive: true })
+    : { mode: "desktop-json", credentialsPath: "", clientId: "", clientSecret: "", authPort: 3000 };
   const configureSecrets = unwrapPrompt(await prompts.select({
     message: "Step 5 of 5 — Configure Jira and GitLab credentials now?",
     options: [
@@ -362,7 +515,20 @@ async function collectOptions(options) {
     }));
   }
   if (!JIRA_AUTH_MODES.includes(jiraAuthMode)) throw new Error("Choose cloud or pat for --jira-auth.");
-  return { ...options, harness, scope, mattPocockSkills, jiraAuthMode, secrets, googleDocsEnabled, googleDocsCredentialsPath };
+  return {
+    ...options,
+    harness,
+    scope,
+    mattPocockSkills,
+    jiraAuthMode,
+    secrets,
+    googleDocsEnabled,
+    googleOauthMode: googleOAuth.mode,
+    googleDocsCredentialsPath: googleOAuth.credentialsPath,
+    googleClientId: googleOAuth.clientId,
+    googleClientSecret: googleOAuth.clientSecret,
+    googleAuthPort: googleOAuth.authPort
+  };
 }
 
 export function mattPocockSkillsInstallArgs({ harness, scope, mode = "workflow" }) {
@@ -415,18 +581,79 @@ export function googleDocsAuthInstaller({ platform = process.platform } = {}) {
   };
 }
 
-async function authenticateGoogleDocs(credentialsPath) {
-  const installer = googleDocsAuthInstaller();
-  await execFileAsync(installer.command, installer.args, {
+async function stopProcessTree(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform === "win32" && child.pid) {
+    try {
+      await execFileAsync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true });
+      return;
+    } catch {}
+  }
+  try { child.kill("SIGTERM"); } catch {}
+}
+
+export async function authenticateGoogleDocs(credentialsPath, {
+  home = os.homedir(),
+  authPort = 3000,
+  installer = googleDocsAuthInstaller(),
+  spawnProcess = spawn,
+  stopChild = stopProcessTree,
+  pollIntervalMs = 500,
+  graceMs = 1500,
+  timeoutMs = 5 * 60 * 1000
+} = {}) {
+  const tokenPath = defaultGoogleTokenPath(home);
+  const before = await googleTokenSnapshot(tokenPath);
+  const child = spawnProcess(installer.command, installer.args, {
     cwd: process.cwd(),
     windowsHide: true,
-    maxBuffer: 5 * 1024 * 1024,
-    timeout: 5 * 60 * 1000,
+    stdio: "inherit",
     env: {
       ...process.env,
       GOOGLE_DRIVE_OAUTH_CREDENTIALS: credentialsPath,
-      GOOGLE_DRIVE_MCP_SCOPES: GOOGLE_DRIVE_READONLY_SCOPES
+      GOOGLE_DRIVE_MCP_SCOPES: GOOGLE_DRIVE_READONLY_SCOPES,
+      GOOGLE_DRIVE_MCP_AUTH_PORT: String(normalizeGoogleAuthPort(authPort))
     }
+  });
+  await new Promise((resolve, reject) => {
+    let settled = false;
+    let graceTimer;
+    const cleanup = () => {
+      clearInterval(pollTimer);
+      clearTimeout(timeoutTimer);
+      if (graceTimer) clearTimeout(graceTimer);
+    };
+    const succeed = async ({ terminate = false } = {}) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (terminate) await stopChild(child);
+      resolve();
+    };
+    const fail = async (error, { terminate = false } = {}) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (terminate) await stopChild(child);
+      reject(error);
+    };
+    const pollTimer = setInterval(async () => {
+      const current = await googleTokenSnapshot(tokenPath);
+      if (!settled && current && current !== before && !graceTimer) {
+        graceTimer = setTimeout(() => void succeed({ terminate: true }), graceMs);
+      }
+    }, pollIntervalMs);
+    const timeoutTimer = setTimeout(
+      () => void fail(new Error(`Google OAuth timed out after ${Math.round(timeoutMs / 1000)} seconds.`), { terminate: true }),
+      timeoutMs
+    );
+    child.once("error", (error) => void fail(error));
+    child.once("exit", async (code) => {
+      if (settled) return;
+      const current = await googleTokenSnapshot(tokenPath);
+      if (code === 0 || (current && current !== before)) await succeed();
+      else await fail(new Error(`Google OAuth process exited with code ${code}.`));
+    });
   });
 }
 
@@ -516,6 +743,7 @@ async function init(options) {
       cwd: process.cwd(),
       includeMattPocockSetup: selected.mattPocockSkills !== "none",
       includeGoogleDocs: selected.googleDocsEnabled,
+      googleDocsAuthPort: selected.googleAuthPort,
       jiraAuthMode: selected.jiraAuthMode,
       jiraUrl: selected.secrets?.JIRA_URL ?? process.env.JIRA_URL,
       gitLabApiUrl: selected.secrets?.GITLAB_API_URL ?? normalizeGitLabApiUrl(process.env.GITLAB_API_URL)
@@ -524,7 +752,10 @@ async function init(options) {
       const skillSummary = selected.mattPocockSkills === "workflow"
         ? `${MATT_POCOCK_WORKFLOW_SKILLS.length} workflow skills`
         : selected.mattPocockSkills === "all" ? "all skills" : "not selected";
-      prompts.note(`Harness: ${selected.harness}\nScope: ${selected.scope}\nJira auth: ${selected.jiraAuthMode === "pat" ? "Server/Data Center PAT" : "Atlassian Cloud API token"}\nGoogle Docs: ${selected.googleDocsEnabled ? "read-only OAuth" : "not configured"}\nFiles: ${new Set(plan.writes.map((write) => write.file)).size}\nMatt Pocock skills: ${skillSummary}\nGitLab writes: none until you explicitly approve them.`, "Ready to install");
+      const googleDocsSummary = selected.googleDocsEnabled
+        ? `read-only OAuth (${selected.googleOauthMode === "web-client" ? "Web client ID + secret" : "Desktop JSON"})`
+        : "not configured";
+      prompts.note(`Harness: ${selected.harness}\nScope: ${selected.scope}\nJira auth: ${selected.jiraAuthMode === "pat" ? "Server/Data Center PAT" : "Atlassian Cloud API token"}\nGoogle Docs: ${googleDocsSummary}\nFiles: ${new Set(plan.writes.map((write) => write.file)).size}\nMatt Pocock skills: ${skillSummary}\nGitLab writes: none until you explicitly approve them.`, "Ready to install");
     }
 
     progress = interactive ? prompts.spinner() : undefined;
@@ -541,18 +772,26 @@ async function init(options) {
       progress?.stop("Original Matt Pocock skills copied");
     }
 
-    let authenticatedGoogleDocs = false;
-    if (selected.googleDocsEnabled && !selected.dryRun && !selected.skipGoogleAuth) {
-      progress?.start("Waiting for read-only Google OAuth in your browser");
-      await authenticateGoogleDocs(selected.googleDocsCredentialsPath);
-      authenticatedGoogleDocs = true;
-      progress?.stop("Google Docs read-only OAuth completed");
+    let installedGoogleDocsCredentialsPath = selected.googleDocsCredentialsPath;
+    if (selected.googleDocsEnabled && !selected.dryRun) {
+      installedGoogleDocsCredentialsPath = selected.googleOauthMode === "web-client"
+        ? await installGoogleDocsWebClient({
+            clientId: selected.googleClientId,
+            clientSecret: selected.googleClientSecret,
+            authPort: selected.googleAuthPort
+          })
+        : await installGoogleDocsCredentials(selected.googleDocsCredentialsPath);
+      if (interactive) prompts.log.success(`Google OAuth client installed in ${installedGoogleDocsCredentialsPath}`);
     }
 
-    const environmentValues = {
-      ...selected.secrets,
-      ...(selected.googleDocsEnabled ? { GOOGLE_DRIVE_OAUTH_CREDENTIALS: selected.googleDocsCredentialsPath } : {})
-    };
+    let authenticatedGoogleDocs = false;
+    if (selected.googleDocsEnabled && !selected.dryRun && !selected.skipGoogleAuth) {
+      if (interactive) prompts.log.info("Complete the read-only Google OAuth flow in your browser. OAuth logs will appear below.");
+      await authenticateGoogleDocs(installedGoogleDocsCredentialsPath, { authPort: selected.googleAuthPort });
+      authenticatedGoogleDocs = true;
+    }
+
+    const environmentValues = { ...selected.secrets };
     const persisted = selected.dryRun ? false : await persistWindowsSecrets(environmentValues);
     if (interactive) {
       prompts.note(files.map((file) => path.relative(process.cwd(), file) || path.basename(file)).join("\n"), selected.dryRun ? "Planned files" : "Installed files");
@@ -562,7 +801,7 @@ async function init(options) {
       }
       if (authenticatedGoogleDocs) prompts.log.success("Google Docs OAuth tokens were stored in the MCP server's user configuration directory.");
       if (selected.googleDocsEnabled && selected.skipGoogleAuth && !selected.dryRun) prompts.log.warn(`Google Docs is configured but not authenticated. Run: npx -y ${GOOGLE_DRIVE_MCP_PACKAGE} auth`);
-      if (persisted) prompts.log.success("Configured Jira, GitLab, and Google Docs environment values were saved as Windows user environment variables.");
+      if (persisted) prompts.log.success("Configured Jira and GitLab environment values were saved as Windows user environment variables.");
       if (Object.keys(environmentValues).length && !persisted && !selected.dryRun) prompts.log.warn("Export the requested environment variables before starting the harness.");
       prompts.note(plan.notes.join("\n"), "Next step");
       prompts.outro(selected.dryRun ? "No files were changed." : "Installation complete. Restart the harness terminal, then begin a delivery.");
@@ -634,28 +873,27 @@ async function update(options, { doctorFix = false } = {}) {
     prompts.note(`Harnesses: ${selected.harnesses.join(", ")}\nScope: ${selected.scope}\nSecrets: preserved`, "Detected installation");
   }
   if (options.googleDocs && !GOOGLE_DOCS_MODES.includes(options.googleDocs)) throw new Error("Choose on or off for --google-docs.");
-  let googleDocsCredentialsPath = resolveUserPath(
-    options.googleOauthCredentials ?? await readEnvironmentValue("GOOGLE_DRIVE_OAUTH_CREDENTIALS")
-  );
-  if (options.googleDocs === "on" && !googleDocsCredentialsPath && interactive) {
-    googleDocsCredentialsPath = resolveUserPath(unwrapPrompt(await prompts.text({
-      message: "Google OAuth Desktop credentials JSON",
-      placeholder: path.join(os.homedir(), ".config", "google-drive-mcp", "gcp-oauth.keys.json")
-    })));
-  }
-  if (options.googleDocs === "on" && !googleDocsCredentialsPath && !options.dryRun) {
-    throw new Error("Google Docs requires --google-oauth-credentials or GOOGLE_DRIVE_OAUTH_CREDENTIALS.");
-  }
-  if (options.googleDocs === "on" && googleDocsCredentialsPath && !(await fileExists(googleDocsCredentialsPath)) && !options.dryRun) {
-    throw new Error(`Google OAuth credentials file was not found: ${googleDocsCredentialsPath}`);
-  }
+  const requestedGoogleOAuth = options.googleDocs === "on"
+    ? await collectGoogleOAuthInput(options, { interactive })
+    : null;
   const changed = [];
+  let detectedGoogleDocsCredentialsPath = "";
+  let googleDocsInstalled = false;
+  let detectedGoogleDocsAuthPort = 3000;
   for (const harness of selected.harnesses) {
     const runtime = await resolveInstalledConfiguration({
       harness,
       scope: selected.scope,
       jiraAuth: options.jiraAuth
     });
+    const includeGoogleDocs = options.googleDocs ? options.googleDocs === "on" : runtime.googleDocsEnabled;
+    if (includeGoogleDocs) {
+      googleDocsInstalled = true;
+      detectedGoogleDocsAuthPort = runtime.googleDocsAuthPort ?? detectedGoogleDocsAuthPort;
+      if (!detectedGoogleDocsCredentialsPath && runtime.googleDocsCredentialsPath && await fileExists(runtime.googleDocsCredentialsPath)) {
+        detectedGoogleDocsCredentialsPath = runtime.googleDocsCredentialsPath;
+      }
+    }
     if (!JIRA_AUTH_MODES.includes(runtime.jiraAuthMode)) throw new Error(`Unsupported Jira authentication mode: ${runtime.jiraAuthMode}`);
     const includeMattPocockSetup = selected.scope === "project"
       && (await fileExists(path.join(process.cwd(), "docs", "agents")) || await fileExists(path.join(process.cwd(), ".agents")) || await fileExists(path.join(process.cwd(), "skills-lock.json")));
@@ -664,7 +902,8 @@ async function update(options, { doctorFix = false } = {}) {
       scope: selected.scope,
       cwd: process.cwd(),
       includeMattPocockSetup,
-      includeGoogleDocs: options.googleDocs ? options.googleDocs === "on" : runtime.googleDocsEnabled,
+      includeGoogleDocs,
+      googleDocsAuthPort: requestedGoogleOAuth?.authPort ?? runtime.googleDocsAuthPort ?? 3000,
       jiraAuthMode: runtime.jiraAuthMode,
       jiraUrl: runtime.jiraUrl,
       gitLabApiUrl: runtime.gitLabApiUrl
@@ -676,17 +915,27 @@ async function update(options, { doctorFix = false } = {}) {
     }
   }
 
-  if (options.googleDocs === "on" && !options.dryRun && !doctorFix) {
-    const persistedGoogleDocsPath = await persistWindowsSecrets({ GOOGLE_DRIVE_OAUTH_CREDENTIALS: googleDocsCredentialsPath });
-    if (!persistedGoogleDocsPath) {
-      const message = "Export GOOGLE_DRIVE_OAUTH_CREDENTIALS before restarting the harness; this platform was not modified automatically.";
-      if (interactive) prompts.log.warn(message);
-      else console.log(message);
-    }
-    if (!options.skipGoogleAuth) {
-      if (interactive) prompts.log.info("Complete the read-only Google OAuth flow in your browser.");
-      await authenticateGoogleDocs(googleDocsCredentialsPath);
-    } else if (!interactive) {
+  const googleDocsInstallSource = requestedGoogleOAuth?.credentialsPath || detectedGoogleDocsCredentialsPath;
+  if (googleDocsInstalled && (googleDocsInstallSource || requestedGoogleOAuth?.mode === "web-client") && !options.dryRun) {
+    const target = defaultGoogleCredentialsPath();
+    const beforeCredentials = await readText(target);
+    const installedGoogleDocsCredentialsPath = requestedGoogleOAuth?.mode === "web-client"
+      ? await installGoogleDocsWebClient({
+          clientId: requestedGoogleOAuth.clientId,
+          clientSecret: requestedGoogleOAuth.clientSecret,
+          authPort: requestedGoogleOAuth.authPort
+        })
+      : await installGoogleDocsCredentials(googleDocsInstallSource);
+    const changedCredentials = beforeCredentials !== await readText(installedGoogleDocsCredentialsPath);
+    if (changedCredentials) changed.push(installedGoogleDocsCredentialsPath);
+    if (interactive) prompts.log.success(`Google OAuth client installed in ${installedGoogleDocsCredentialsPath}`);
+    else if (changedCredentials && !doctorFix) console.log(`Google OAuth client installed in ${installedGoogleDocsCredentialsPath}`);
+    if (options.googleDocs === "on" && !doctorFix && !options.skipGoogleAuth) {
+      if (interactive) prompts.log.info("Complete the read-only Google OAuth flow in your browser. OAuth logs will appear below.");
+      await authenticateGoogleDocs(installedGoogleDocsCredentialsPath, {
+        authPort: requestedGoogleOAuth?.authPort ?? detectedGoogleDocsAuthPort
+      });
+    } else if (options.googleDocs === "on" && !doctorFix && !interactive) {
       console.log(`Google Docs is configured but not authenticated. Run: npx -y ${GOOGLE_DRIVE_MCP_PACKAGE} auth`);
     }
   }

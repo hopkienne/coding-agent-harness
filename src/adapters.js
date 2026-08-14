@@ -30,7 +30,7 @@ function joinAgentSkills(existing = "") {
 }
 
 const JIRA_AUTH_ENV_KEYS = ["JIRA_USERNAME", "JIRA_API_TOKEN", "JIRA_PERSONAL_TOKEN"];
-const GOOGLE_DOCS_ENV_KEYS = ["GOOGLE_DRIVE_OAUTH_CREDENTIALS", "GOOGLE_DRIVE_MCP_SCOPES"];
+const GOOGLE_DOCS_ENV_KEYS = ["GOOGLE_DRIVE_OAUTH_CREDENTIALS", "GOOGLE_DRIVE_MCP_SCOPES", "GOOGLE_DRIVE_MCP_AUTH_PORT"];
 const CODEX_MCP_START = "# >>> coding-agent-harness MCP >>>";
 const CODEX_MCP_END = "# <<< coding-agent-harness MCP <<<";
 
@@ -119,7 +119,7 @@ function mergeGitignore(existing = "", entries = []) {
   return `${prefix}${prefix ? "\n\n" : ""}${GITIGNORE_START}\n${missing.join("\n")}\n${GITIGNORE_END}\n`;
 }
 
-export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = os.homedir(), includeMattPocockSetup = false, includeGoogleDocs = false, jiraAuthMode = "cloud", jiraUrl = "", gitLabApiUrl = "" }) {
+export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = os.homedir(), includeMattPocockSetup = false, includeGoogleDocs = false, googleDocsAuthPort = 3000, jiraAuthMode = "cloud", jiraUrl = "", gitLabApiUrl = "" }) {
   if (!["pi", "claude-code", "opencode", "codex"].includes(harness)) {
     throw new Error(`Unsupported harness: ${harness}`);
   }
@@ -128,7 +128,7 @@ export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = o
   }
 
   const root = scope === "project" ? cwd : home;
-  const mcpServers = standardMcpServers({ jiraAuthMode, jiraUrl, gitLabApiUrl, includeGoogleDocs });
+  const mcpServers = standardMcpServers({ jiraAuthMode, jiraUrl, gitLabApiUrl, includeGoogleDocs, googleDocsAuthPort });
   const plan = { harness, scope, root, writes: [], notes: [] };
   const projectIgnoreEntries = new Set();
   const writeText = (file, content, kind = "text") => plan.writes.push({ file, content, kind });

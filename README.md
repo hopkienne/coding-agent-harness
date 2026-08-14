@@ -72,6 +72,10 @@ The interactive installer is a guided terminal wizard: it opens with an overview
 ◇  Step 4 of 5 — Read Google Docs linked from Jira?
 │  Yes, configure read-only access
 │
+◇  Choose the Google OAuth client type
+│  Desktop app JSON (recommended)
+│  Web application (client ID + secret)
+│
 ◇  Step 5 of 5 — Configure Jira and GitLab credentials now?
 │  Yes, configure now
 │
@@ -132,6 +136,14 @@ For unattended setup with Google Docs enabled, provide an OAuth Desktop credenti
 npx @hopkienne/coding-agent-harness init --harness opencode --scope project --yes --google-docs on --google-oauth-credentials /secure/gcp-oauth.keys.json
 ```
 
+Alternatively, use a Web application OAuth client. Prefer environment variables for the secret instead of placing it in shell history:
+
+```bash
+export GOOGLE_DRIVE_MCP_CLIENT_ID="<client-id>"
+export GOOGLE_DRIVE_MCP_CLIENT_SECRET="<client-secret>"
+npx @hopkienne/coding-agent-harness init --harness opencode --scope project --yes --google-docs on --google-oauth-mode web-client
+```
+
 ## Updating and repairing an installation
 
 Run `update` from an already configured repository to detect and upgrade every installed project-scoped harness. It refreshes managed workflow commands, MCP definitions, Pi package registration, and `.gitignore` entries while preserving secrets, unrelated commands, MCP servers, packages, and settings:
@@ -152,7 +164,7 @@ Enable read-only Google Docs on an existing installation:
 npx --yes @hopkienne/coding-agent-harness@latest update --google-docs on --google-oauth-credentials /secure/gcp-oauth.keys.json
 ```
 
-`doctor` reports runtimes, detected harnesses, Jira authentication requirements, Google OAuth credential/token state when enabled, missing credentials, and Pi adapter registration. Add `--fix` to repair managed files using the existing non-secret endpoint configuration and environment-variable references:
+`doctor` reports runtimes, detected harnesses, Jira authentication requirements, Google OAuth credential/token state when enabled, missing credentials, and Pi adapter registration. Add `--fix` to repair managed files and copy an existing Google OAuth client into the upstream standard user configuration location:
 
 ```bash
 npx --yes @hopkienne/coding-agent-harness@latest doctor
@@ -218,7 +230,14 @@ Pi does not load `.pi/mcp.json` natively. For Pi installations, the harness also
 
 ### Linked Google Docs
 
-Google Docs integration is opt-in because every user or organization must supply its own Google OAuth application. In Google Cloud, enable the Drive and Docs APIs, create an OAuth client of type **Desktop app**, and download its credentials JSON. The installer validates only the file path, stores no credential or token in the repository, and opens the package's OAuth flow during installation. Tokens remain in the MCP server's user configuration directory.
+Google Docs integration is opt-in because every user or organization must supply its own Google OAuth application. The wizard supports two input modes:
+
+- **Desktop app JSON (recommended):** download the credentials JSON from Google Cloud. Loopback redirects work automatically.
+- **Web application:** enter `client_id` and `client_secret`. The installer materializes the upstream-required JSON outside the repository. Register all five callback URLs shown by the wizard in the Web client's **Authorized redirect URIs**.
+
+The upstream local stdio flow always loads `~/.config/google-drive-mcp/gcp-oauth.keys.json`; it does not directly consume a bare client ID/secret pair. Coding Agent Harness bridges that limitation by creating the file for Web-client input. The default callback range is `http://127.0.0.1:3000/oauth2callback` through port `3004`; change the starting port with `--google-auth-port`. The installer restricts file permissions where supported and opens the OAuth flow. Neither credentials nor tokens are written to the repository; tokens remain at `~/.config/google-drive-mcp/tokens.json` unless explicitly overridden.
+
+The local stdio OAuth mode used by Pi, OpenCode, Claude Code, and Codex cannot consume `GOOGLE_DRIVE_MCP_CLIENT_ID` plus `GOOGLE_DRIVE_MCP_CLIENT_SECRET` directly. Coding Agent Harness accepts that pair as installer input, writes the small compatibility JSON expected by the upstream package, and then runs the same refreshable local OAuth flow for every harness.
 
 The generated server requests exactly these scopes:
 
@@ -240,8 +259,11 @@ JIRA_API_TOKEN
 JIRA_PERSONAL_TOKEN
 GITLAB_API_URL
 GITLAB_PERSONAL_ACCESS_TOKEN
-GOOGLE_DRIVE_OAUTH_CREDENTIALS
+GOOGLE_DRIVE_OAUTH_CREDENTIALS (optional override; installer targets the standard user config path)
 GOOGLE_DRIVE_MCP_TOKEN_PATH (optional override)
+GOOGLE_DRIVE_MCP_CLIENT_ID (Web-client installer input)
+GOOGLE_DRIVE_MCP_CLIENT_SECRET (Web-client installer input)
+GOOGLE_DRIVE_MCP_AUTH_PORT (optional callback range start; default 3000)
 ```
 
 On Windows, the interactive installer can save supplied values as user-level environment variables. Select **Atlassian Cloud** to use `JIRA_USERNAME` + `JIRA_API_TOKEN`, or **Server / Data Center** to use `JIRA_PERSONAL_TOKEN`; the wizard defaults from the Jira hostname but lets you override it. The GitLab value is normalized to the required API endpoint format, for example `https://gitlab.example.com/api/v4`. Restart the terminal or harness after installation so it receives the updated values. For CI and macOS/Linux, inject the values through your platform's normal secret-management mechanism.
@@ -260,6 +282,9 @@ npx @hopkienne/coding-agent-harness init --harness opencode --scope project --ye
 
 # Enable linked Google Docs with read-only OAuth
 npx @hopkienne/coding-agent-harness update --google-docs on --google-oauth-credentials /secure/gcp-oauth.keys.json
+
+# Or configure a Web OAuth client interactively
+npx @hopkienne/coding-agent-harness update --google-docs on --google-oauth-mode web-client
 
 # Remove generated commands and workflow instructions (keeps MCP, credentials, and skills)
 npx @hopkienne/coding-agent-harness uninstall --harness opencode --scope project --yes

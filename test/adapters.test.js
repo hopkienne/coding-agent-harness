@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,8 +9,13 @@ import { promisify } from "node:util";
 import {
   buildInstallPlan,
   buildUninstallPlan,
+  authenticateGoogleDocs,
+  defaultGoogleCredentialsPath,
   MATT_POCOCK_WORKFLOW_SKILLS,
   googleDocsAuthInstaller,
+  googleOAuthRedirectUris,
+  installGoogleDocsCredentials,
+  installGoogleDocsWebClient,
   mattPocockSkillsInstallArgs,
   mattPocockSkillsInstaller,
   inferJiraAuthMode,
@@ -118,8 +124,9 @@ test("Google Docs opt-in emits a pinned read-only MCP server", () => {
   const piConfig = piPlan.writes.find((write) => write.file.endsWith("mcp.json")).value;
   const googleDocs = piConfig.mcpServers["google-docs"];
   assert.deepEqual(googleDocs.args, ["-y", "@piotr-agier/google-drive-mcp@2.5.0"]);
-  assert.equal(googleDocs.env.GOOGLE_DRIVE_OAUTH_CREDENTIALS, "${GOOGLE_DRIVE_OAUTH_CREDENTIALS}");
+  assert.equal("GOOGLE_DRIVE_OAUTH_CREDENTIALS" in googleDocs.env, false);
   assert.equal(googleDocs.env.GOOGLE_DRIVE_MCP_SCOPES, "https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/documents.readonly");
+  assert.equal(googleDocs.env.GOOGLE_DRIVE_MCP_AUTH_PORT, "3000");
   assert.ok(piPlan.writes.find((write) => write.file.endsWith("delivery.md")).content.includes("untrusted data"));
 
   const openCodePlan = buildInstallPlan({
@@ -130,7 +137,7 @@ test("Google Docs opt-in emits a pinned read-only MCP server", () => {
     includeGoogleDocs: true
   });
   const openCodeConfig = openCodePlan.writes.find((write) => write.file.endsWith("opencode.json")).value;
-  assert.equal(openCodeConfig.mcp["google-docs"].environment.GOOGLE_DRIVE_OAUTH_CREDENTIALS, "{env:GOOGLE_DRIVE_OAUTH_CREDENTIALS}");
+  assert.equal("GOOGLE_DRIVE_OAUTH_CREDENTIALS" in openCodeConfig.mcp["google-docs"].environment, false);
   assert.equal(openCodeConfig.mcp["google-docs"].disabled, false);
 });
 
@@ -149,7 +156,7 @@ test("Codex Google Docs MCP merge is project-scoped, additive, and idempotent", 
   assert.equal(twice, once);
   assert.ok(once.includes("model = \"gpt-5\""));
   assert.ok(once.includes('[mcp_servers."google-docs"]'));
-  assert.ok(once.includes('env_vars = ["GOOGLE_DRIVE_OAUTH_CREDENTIALS"]'));
+  assert.equal(once.includes("GOOGLE_DRIVE_OAUTH_CREDENTIALS"), false);
   assert.ok(once.includes('enabled_tools = ["authGetStatus", "getFileMetadata", "readGoogleDoc", "readGoogleDocPaginated"]'));
   assert.ok(once.includes("https://www.googleapis.com/auth/documents.readonly"));
   assert.ok(plan.writes.find((item) => item.kind === "gitignore").entries.includes("/.codex/"));
@@ -162,6 +169,84 @@ test("Google Docs OAuth command is Windows-safe and user paths expand", () => {
   });
   assert.equal(resolveUserPath("~/.config/oauth.json", "C:/Users/example").replaceAll("\\", "/"), "C:/Users/example/.config/oauth.json");
   assert.equal(resolveUserPath("C:/Users/example/oauth.json").replaceAll("\\", "/"), "C:/Users/example/oauth.json");
+});
+
+test("Google Docs credentials are validated and installed in the upstream standard location", async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), "coding-agent-harness-google-credentials-"));
+  const home = path.join(workspace, "home");
+  const source = path.join(workspace, "desktop-client.json");
+  const credentials = {
+    installed: {
+      client_id: "example.apps.googleusercontent.com",
+      client_secret: "test-client-secret",
+      redirect_uris: ["http://localhost"]
+    }
+  };
+  try {
+    await writeFile(source, JSON.stringify(credentials), "utf8");
+    const installed = await installGoogleDocsCredentials(source, { home });
+    assert.equal(installed, defaultGoogleCredentialsPath(home));
+    assert.deepEqual(JSON.parse(await readFile(installed, "utf8")), credentials);
+
+    const invalid = path.join(workspace, "invalid.json");
+    await writeFile(invalid, JSON.stringify({ installed: { client_id: "missing-secret" } }), "utf8");
+    await assert.rejects(
+      installGoogleDocsCredentials(invalid, { home }),
+      /client_id and client_secret/
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("Google Docs web client input is materialized with every upstream loopback redirect", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "coding-agent-harness-google-web-client-"));
+  try {
+    const installed = await installGoogleDocsWebClient({
+      clientId: "web.apps.googleusercontent.com",
+      clientSecret: "test-web-secret",
+      authPort: 3100,
+      home
+    });
+    const credentials = JSON.parse(await readFile(installed, "utf8"));
+    assert.equal(credentials.web.client_id, "web.apps.googleusercontent.com");
+    assert.equal(credentials.web.client_secret, "test-web-secret");
+    assert.deepEqual(credentials.web.redirect_uris, googleOAuthRedirectUris(3100));
+    assert.equal(credentials.web.redirect_uris[0], "http://127.0.0.1:3100/oauth2callback");
+    assert.equal(credentials.web.redirect_uris[4], "http://127.0.0.1:3104/oauth2callback");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Google Docs OAuth completes when a valid token is written even if the upstream process lingers", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "coding-agent-harness-google-auth-"));
+  const tokenPath = path.join(home, ".config", "google-drive-mcp", "tokens.json");
+  const child = new EventEmitter();
+  child.exitCode = null;
+  child.signalCode = null;
+  let stopped = false;
+  let spawnedEnvironment;
+  try {
+    setTimeout(async () => {
+      await mkdir(path.dirname(tokenPath), { recursive: true });
+      await writeFile(tokenPath, JSON.stringify({ version: 2, accounts: { default: { accessToken: "test-access", refreshToken: "test-refresh" } } }), "utf8");
+    }, 20);
+    await authenticateGoogleDocs("C:/oauth.json", {
+      home,
+      installer: { command: "fake", args: [] },
+      spawnProcess: (_command, _args, spawnOptions) => { spawnedEnvironment = spawnOptions.env; return child; },
+      stopChild: async () => { stopped = true; child.signalCode = "SIGTERM"; },
+      authPort: 3100,
+      pollIntervalMs: 10,
+      graceMs: 10,
+      timeoutMs: 2000
+    });
+    assert.equal(stopped, true);
+    assert.equal(spawnedEnvironment.GOOGLE_DRIVE_MCP_AUTH_PORT, "3100");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("Jira authentication mode is inferred and rendered for Cloud or Server/Data Center", () => {
@@ -339,6 +424,47 @@ test("OpenCode installation creates a working project configuration without secr
   }
 });
 
+test("Web OAuth init stores the client outside the project and keeps the MCP config secret-free", async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), "coding-agent-harness-web-init-"));
+  const fakeHome = path.join(workspace, "home");
+  const project = path.join(workspace, "project");
+  const cli = path.resolve("bin/coding-agent-harness.js");
+  try {
+    await mkdir(project, { recursive: true });
+    await execFileAsync(process.execPath, [
+      cli,
+      "init",
+      "--harness", "opencode",
+      "--scope", "project",
+      "--yes",
+      "--google-docs", "on",
+      "--google-oauth-mode", "web-client",
+      "--google-auth-port", "3100",
+      "--skip-google-auth"
+    ], {
+      cwd: project,
+      env: {
+        ...process.env,
+        HOME: fakeHome,
+        USERPROFILE: fakeHome,
+        GOOGLE_DRIVE_MCP_CLIENT_ID: "web.apps.googleusercontent.com",
+        GOOGLE_DRIVE_MCP_CLIENT_SECRET: "web-client-test-secret"
+      }
+    });
+    const credentials = JSON.parse(await readFile(defaultGoogleCredentialsPath(fakeHome), "utf8"));
+    const configText = await readFile(path.join(project, "opencode.json"), "utf8");
+    const config = JSON.parse(configText);
+    assert.equal(credentials.web.client_id, "web.apps.googleusercontent.com");
+    assert.equal(credentials.web.client_secret, "web-client-test-secret");
+    assert.deepEqual(credentials.web.redirect_uris, googleOAuthRedirectUris(3100));
+    assert.equal(configText.includes("web-client-test-secret"), false);
+    assert.equal(config.mcp["google-docs"].environment.GOOGLE_DRIVE_MCP_AUTH_PORT, "3100");
+    assert.equal("GOOGLE_DRIVE_OAUTH_CREDENTIALS" in config.mcp["google-docs"].environment, false);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("update upgrades an existing Pi workflow and preserves unrelated settings", async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), "coding-agent-harness-pi-update-"));
   const cli = path.resolve("bin/coding-agent-harness.js");
@@ -365,6 +491,43 @@ test("update upgrades an existing Pi workflow and preserves unrelated settings",
     });
     assert.ok(stdout.includes("[dry-run] would update"));
     assert.ok(stdout.includes(path.join(".pi", "mcp.json")));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("update repairs an existing Google Docs installation into the upstream standard credentials path", async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), "coding-agent-harness-google-update-"));
+  const fakeHome = path.join(workspace, "home");
+  const cli = path.resolve("bin/coding-agent-harness.js");
+  const source = path.join(workspace, "desktop-client.json");
+  try {
+    const plan = buildInstallPlan({
+      harness: "pi",
+      scope: "project",
+      cwd: workspace,
+      home: fakeHome,
+      includeGoogleDocs: true,
+      jiraAuthMode: "pat",
+      jiraUrl: "https://jira.example.com"
+    });
+    for (const write of plan.writes.filter((item) => item.kind !== "gitignore")) {
+      await mkdir(path.dirname(write.file), { recursive: true });
+      await writeFile(write.file, mergeWrite("", write), "utf8");
+    }
+    await writeFile(source, JSON.stringify({ installed: { client_id: "example.apps.googleusercontent.com", client_secret: "test-secret" } }), "utf8");
+    await execFileAsync(process.execPath, [cli, "update", "--harness", "pi", "--scope", "project", "--yes"], {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        HOME: fakeHome,
+        USERPROFILE: fakeHome,
+        GOOGLE_DRIVE_OAUTH_CREDENTIALS: source,
+        JIRA_URL: "https://jira.example.com"
+      }
+    });
+    const installed = defaultGoogleCredentialsPath(fakeHome);
+    assert.deepEqual(JSON.parse(await readFile(installed, "utf8")), JSON.parse(await readFile(source, "utf8")));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
