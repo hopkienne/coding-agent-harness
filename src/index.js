@@ -129,7 +129,9 @@ export function resolveUserPath(value = "", home = os.homedir()) {
   const input = value.trim();
   if (!input) return "";
   if (input === "~") return home;
-  if (input.startsWith("~/") || input.startsWith("~\\")) return path.resolve(home, input.slice(2));
+  const homePath = path.win32.isAbsolute(home) && !path.posix.isAbsolute(home) ? path.win32 : path;
+  if (input.startsWith("~/") || input.startsWith("~\\")) return homePath.resolve(home, input.slice(2));
+  if (path.win32.isAbsolute(input) && !path.posix.isAbsolute(input)) return path.win32.resolve(input);
   return path.resolve(input);
 }
 

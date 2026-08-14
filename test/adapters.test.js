@@ -161,6 +161,7 @@ test("Google Docs OAuth command is Windows-safe and user paths expand", () => {
     args: ["/d", "/s", "/c", "npx -y @piotr-agier/google-drive-mcp@2.5.0 auth"]
   });
   assert.equal(resolveUserPath("~/.config/oauth.json", "C:/Users/example").replaceAll("\\", "/"), "C:/Users/example/.config/oauth.json");
+  assert.equal(resolveUserPath("C:/Users/example/oauth.json").replaceAll("\\", "/"), "C:/Users/example/oauth.json");
 });
 
 test("Jira authentication mode is inferred and rendered for Cloud or Server/Data Center", () => {
