@@ -143,11 +143,13 @@ export function mattPocockSkillsInstallArgs({ harness, scope }) {
 }
 
 export function mattPocockSkillsInstaller({ harness, scope, platform = process.platform }) {
+  if (!HARNESS_CHOICES.some((choice) => choice.value === harness)) throw new Error(`Unsupported harness: ${harness}`);
+  if (!SCOPE_CHOICES.some((choice) => choice.value === scope)) throw new Error(`Unsupported scope: ${scope}`);
   const args = mattPocockSkillsInstallArgs({ harness, scope });
   if (platform !== "win32") return { command: "npx", args };
   return {
     command: "cmd.exe",
-    args: ["/d", "/s", "/c", `npx ${args.map((argument) => `"${argument}"`).join(" ")}`]
+    args: ["/d", "/s", "/c", `npx ${args.join(" ")}`]
   };
 }
 

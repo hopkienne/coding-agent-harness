@@ -51,8 +51,9 @@ test("all Matt Pocock skills are copied only for the selected harness and scope"
   assert.deepEqual(mattPocockSkillsInstallArgs({ harness: "pi", scope: "global" }).slice(-2), ["--copy", "--global"]);
   assert.deepEqual(mattPocockSkillsInstaller({ harness: "opencode", scope: "project", platform: "win32" }), {
     command: "cmd.exe",
-    args: ["/d", "/s", "/c", "npx \"--yes\" \"skills@latest\" \"add\" \"mattpocock/skills\" \"--skill\" \"*\" \"--agent\" \"opencode\" \"--yes\" \"--copy\""]
+    args: ["/d", "/s", "/c", "npx --yes skills@latest add mattpocock/skills --skill * --agent opencode --yes --copy"]
   });
+  assert.throws(() => mattPocockSkillsInstaller({ harness: "opencode & whoami", scope: "project", platform: "win32" }), /Unsupported harness/);
 });
 
 test("Matt Pocock installation also bootstraps repository configuration without overwriting it", () => {
