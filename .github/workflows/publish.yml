@@ -1,23 +1,27 @@
-name: Publish npm package
+name: Release npm package
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
-  contents: read
-  id-token: write
+  contents: write
+
+concurrency:
+  group: npm-release-main
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
-    environment: npm-publish
 
     steps:
-      - name: Check out source
+      - name: Check out source and tags
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -34,16 +38,8 @@ jobs:
           npm test
           npm pack --dry-run
 
-      - name: Ensure release tag matches package version
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          test "${GITHUB_REF_NAME}" = "v${VERSION}"
-
-      - name: Publish public package
-        run: npm publish --access public --provenance
+      - name: Calculate version and publish
+        run: npx semantic-release
         env:
-          # Needed only for the first publish if npm Trusted Publishing has not
-          # yet been configured. Use a granular token with bypass-2FA enabled,
-          # then remove this secret after OIDC publishing is verified.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

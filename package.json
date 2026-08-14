@@ -22,6 +22,11 @@
     "start": "node bin/coding-agent-harness.js",
     "prepublishOnly": "npm test"
   },
+  "devDependencies": {
+    "@semantic-release/git": "10.0.1",
+    "conventional-changelog-conventionalcommits": "9.3.1",
+    "semantic-release": "24.2.9"
+  },
   "keywords": [
     "coding-agent",
     "harness",

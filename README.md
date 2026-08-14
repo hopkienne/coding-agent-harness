@@ -156,35 +156,27 @@ The test suite covers adapter plans, non-destructive MCP merges, idempotent inst
 └── test/         # Node.js test suite
 ```
 
-## Publishing from GitHub Actions
+## Automatic publishing from GitHub Actions
 
-Publishing is tag-driven through [`.github/workflows/publish.yml`](./.github/workflows/publish.yml). The workflow tests, checks the package contents, verifies that the tag matches `package.json`, and publishes with npm provenance.
+Every push to `main` runs [`.github/workflows/publish.yml`](./.github/workflows/publish.yml). After tests and the package-content check pass, `semantic-release` derives the next semantic version from Conventional Commit messages, updates `package.json` and `package-lock.json`, creates a Git tag and GitHub Release, then publishes to npm.
 
-### First release bootstrap
+Create a repository secret named `NPM_TOKEN`. It must be an npm granular access token with **read and write** access to `@hopkienne/coding-agent-harness`; when npm 2FA is enabled, also enable **Bypass 2FA** for this CI token. Never put the token in the repository or a workflow file.
 
-1. Create the public GitHub repository `hopkienne/coding-agent-harness`, add it as `origin`, and push `main`.
-2. In npm, create a **granular** token with package publish permission and **bypass 2FA** enabled. Add it to the GitHub repository as the `NPM_TOKEN` Actions secret. This is only a bootstrap credential.
-3. Create and push the release tag:
+| Commit format | Automatic result |
+| --- | --- |
+| `fix: repair installer validation` or `perf: ...` | Patch release (`0.1.0` → `0.1.1`) |
+| `feat: add Claude Code adapter` | Minor release (`0.1.0` → `0.2.0`) |
+| `feat!: replace the config schema` or a `BREAKING CHANGE:` footer | Major release (`0.1.0` → `1.0.0`) |
+| `docs: ...`, `test: ...`, `ci: ...`, `chore: ...` | No npm release |
 
-   ```bash
-   git tag v0.1.0
-   git push origin main --tags
-   ```
+For example, once this automation is merged, a commit such as the following on `main` publishes `0.1.1` automatically:
 
-4. Confirm that the GitHub Actions `Publish npm package` run succeeds and that `https://www.npmjs.com/package/@hopkienne/coding-agent-harness` is public.
-
-### Switch to trusted publishing
-
-After the first publish, configure npm **Trusted Publishing** for GitHub Actions in the package settings:
-
-```text
-Organization/user: hopkienne
-Repository: coding-agent-harness
-Workflow filename: publish.yml
-Allowed action: npm publish
+```bash
+git commit -m "fix: preserve existing OpenCode command settings"
+git push origin main
 ```
 
-The workflow already grants `id-token: write`, so npm can use OIDC and generate provenance without a long-lived token. Run one release through Trusted Publishing, then delete the `NPM_TOKEN` GitHub secret. You can additionally set the npm package to require 2FA and disallow traditional tokens.
+The generated `chore(release)` commit is marked `[skip ci]`, so it records the new version without causing a second workflow run.
 
 ## License
 
