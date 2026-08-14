@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/hopkienne/coding-agent-harness/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-0f172a?style=flat-square" alt="MIT license" /></a>
-  <img src="https://img.shields.io/badge/node-%E2%89%A520-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js 20 or newer" />
+  <img src="https://img.shields.io/badge/node-%E2%89%A520.12-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js 20.12 or newer" />
   <img src="https://img.shields.io/badge/workflow-human--gated-06b6d4?style=flat-square" alt="Human-gated workflow" />
 </p>
 
@@ -38,7 +38,7 @@ Coding agents are fast at producing code. Delivery quality still depends on a pr
 
 It installs:
 
-- a `/delivery` entry point where the harness supports commands;
+- an end-to-end `/delivery` entry point plus eleven focused workflow commands where the harness supports commands;
 - a one-question-at-a-time architecture grill;
 - durable documentation conventions for `CONTEXT.md`, `docs/adr/`, and `docs/specs/`;
 - MCP wiring for Jira, GitLab, and Chrome DevTools;
@@ -52,15 +52,24 @@ After the package is published to npm, run this from the project you want to con
 npx @hopkienne/coding-agent-harness init
 ```
 
-The interactive installer presents keyboard menus for the target harness, installation scope, and whether to configure Jira/GitLab variables. Use <kbd>↑</kbd>/<kbd>↓</kbd> and <kbd>Enter</kbd>; text and secret fields are entered normally.
+The interactive installer is a guided terminal wizard: it opens with an overview, presents keyboard menus with descriptions, masks credentials, shows an install spinner, and closes with the exact next command. Use <kbd>↑</kbd>/<kbd>↓</kbd> and <kbd>Enter</kbd>; press <kbd>Esc</kbd> or <kbd>Ctrl</kbd>+<kbd>C</kbd> to exit safely before files are changed.
 
 ```text
-Choose a coding-agent harness
-Use ↑/↓ to choose, then Enter.
-  Pi
-  Claude Code
-  Codex
-❯ OpenCode
+┌  Coding Agent Harness
+│
+◇  Step 1 of 4 — Choose your coding-agent harness
+│  OpenCode
+│
+◇  Step 2 of 4 — Choose the installation scope
+│  Project
+│
+◇  Step 3 of 4 — Install all original Matt Pocock skills?
+│  Yes
+│
+◇  Step 4 of 4 — Configure Jira and GitLab credentials now?
+│  Yes, configure now
+│
+◇  Installation complete. Restart the harness terminal, then begin a delivery.
 ```
 
 Then start a delivery:
@@ -77,6 +86,20 @@ The agent reads the Jira issue, begins the grill, and asks exactly one material 
 > node .\bin\coding-agent-harness.js init
 > ```
 
+## Original Matt Pocock skills
+
+The built-in commands make the delivery workflow portable. Selecting **Yes** in step 3 additionally copies every currently discoverable skill from [`mattpocock/skills`](https://github.com/mattpocock/skills) into the selected harness and scope. It uses the official Skills CLI with a copied installation, so the project does not depend on a temporary clone or a symlink.
+
+For the overlapping engineering steps—`/grill-with-docs`, `/wayfinder`, `/to-spec`, `/to-tickets`, `/implement`, `/tdd`, `/code-review`, `/diagnosing-bugs`, and `/improve-codebase-architecture`—the generated workflow command treats the original `SKILL.md` as its primary procedure. The harness layer continues to enforce its non-negotiable rules: Jira is the requirement source and every GitLab write or merge request requires an explicit human confirmation.
+
+The installer also completes the one-time repository setup normally performed by `/setup-matt-pocock-skills`: it adds the `## Agent skills` instruction block and non-destructively seeds `docs/agents/issue-tracker.md`, `docs/agents/triage-labels.md`, and `docs/agents/domain.md`. They define Jira as the requirement source, GitLab as the human-gated technical tracker, the default label vocabulary, and the `CONTEXT.md`/`docs/adr/` convention. Existing files are preserved; edit these files later if your team’s vocabulary or tracker policy changes.
+
+The optional Skills CLI currently requires Node.js **22.20 or newer**. The base harness remains compatible with Node.js 20.12 or newer. For unattended setup, opt in explicitly:
+
+```bash
+npx @hopkienne/coding-agent-harness init --harness opencode --scope project --yes --with-matt-pocock-skills
+```
+
 ## Harness support
 
 | Harness | Workflow entry point | MCP output | Install scope |
@@ -87,6 +110,24 @@ The agent reads the Jira issue, begins the grill, and asks exactly one material 
 | **Codex** | `AGENTS.md` + `docs/agent-workflow/delivery.md` | Existing user-level MCP config is preserved | Project or global |
 
 Codex MCP registration is intentionally deferred in `v0.1`: its shared user-level TOML can serve many unrelated projects, so the installer does not rewrite it automatically.
+
+## Workflow commands
+
+`/delivery` is the guided end-to-end route. The installer also adds focused commands so developers can enter or resume a specific phase without re-running the entire workflow.
+
+| Command | Purpose |
+| --- | --- |
+| `/grill-with-docs <JIRA-KEY>` | Resolve ambiguity and record context/ADRs. |
+| `/wayfinder <area>` | Map a large or unfamiliar initiative into small investigations. |
+| `/to-spec <JIRA-KEY>` | Produce a traced implementation spec. |
+| `/to-tickets <JIRA-KEY> <project>` | Propose, then create approved GitLab tickets. |
+| `/implement <issue>` | Implement one approved ticket. |
+| `/tdd [scope]` | Enforce RED → GREEN → REFACTOR. |
+| `/verify-ui <URL-or-flow>` | Verify UI criteria through Chrome DevTools MCP. |
+| `/code-review [scope]` | Review a diff against specs and architecture. |
+| `/create-mr <branch> [target]` | Preview, confirm, and create a GitLab MR. |
+| `/diagnosing-bugs <symptom>` | Reproduce, narrow, fix, and verify bugs. |
+| `/improve-codebase-architecture [area]` | Plan incremental architecture improvements. |
 
 ## What `/delivery` does
 
@@ -123,7 +164,7 @@ GITLAB_API_URL
 GITLAB_PERSONAL_ACCESS_TOKEN
 ```
 
-On Windows, the interactive installer can save supplied values as user-level environment variables. Restart the terminal or harness after installation so it receives them. For CI and macOS/Linux, inject the values through your platform's normal secret-management mechanism.
+On Windows, the interactive installer can save supplied values as user-level environment variables. The GitLab value is normalized to the required API endpoint format, for example `https://gitlab.example.com/api/v4`. Restart the terminal or harness after installation so it receives the updated values. For CI and macOS/Linux, inject the values through your platform's normal secret-management mechanism.
 
 ## Commands
 
@@ -134,11 +175,16 @@ npx @hopkienne/coding-agent-harness init
 # Preview every file change without writing
 npx @hopkienne/coding-agent-harness init --harness opencode --scope project --yes --dry-run
 
+# Remove generated commands and workflow instructions (keeps MCP, credentials, and skills)
+npx @hopkienne/coding-agent-harness uninstall --harness opencode --scope project --yes
+
 # Show runtime prerequisites
 npx @hopkienne/coding-agent-harness doctor
 ```
 
 `--yes` is for non-interactive usage; provide the required environment variables before running it.
+
+`uninstall` is deliberately conservative: it removes generated command files, native OpenCode workflow commands, and the guarded workflow instruction block. It preserves MCP configuration, user environment variables, `docs/agents/`, and third-party skills such as `mattpocock/skills`.
 
 ## Development
 
