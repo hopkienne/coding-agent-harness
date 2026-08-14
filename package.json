@@ -1,6 +1,6 @@
 {
   "name": "@hopkienne/coding-agent-harness",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Install a guarded Jira-to-GitLab delivery workflow into coding-agent harnesses.",
   "type": "module",
   "bin": {
