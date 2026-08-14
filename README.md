@@ -121,11 +121,34 @@ The optional Skills CLI currently requires Node.js **22.20 or newer**. The base 
 npx @hopkienne/coding-agent-harness init --harness opencode --scope project --yes --matt-pocock-skills workflow
 ```
 
+## Updating and repairing an installation
+
+Run `update` from an already configured repository to detect and upgrade every installed project-scoped harness. It refreshes managed workflow commands, MCP definitions, Pi package registration, and `.gitignore` entries while preserving secrets, unrelated commands, MCP servers, packages, and settings:
+
+```bash
+npx --yes @hopkienne/coding-agent-harness@latest update
+```
+
+Restrict the operation when needed:
+
+```bash
+npx --yes @hopkienne/coding-agent-harness@latest update --harness pi --scope project
+```
+
+`doctor` reports runtimes, detected harnesses, Jira authentication requirements, missing credentials, and Pi adapter registration. Add `--fix` to repair managed files using the existing non-secret endpoint configuration and environment-variable references:
+
+```bash
+npx --yes @hopkienne/coding-agent-harness@latest doctor
+npx --yes @hopkienne/coding-agent-harness@latest doctor --fix
+```
+
+Neither command reinstalls third-party Matt Pocock skills or prints or writes token values. After repairing Pi, restart or reload Pi and run `/mcp reconnect jira`.
+
 ## Harness support
 
 | Harness | Workflow entry point | MCP output | Install scope |
 | --- | --- | --- | --- |
-| **Pi** | `.pi/prompts/delivery.md` → `/delivery` with full-request `$@` expansion | Pi MCP adapter configuration | Project or global |
+| **Pi** | `.pi/prompts/delivery.md` → `/delivery` with full-request `$@` expansion | Registers `npm:pi-mcp-adapter@2.23.0` and writes `.pi/mcp.json` | Project or global |
 | **Claude Code** | `.claude/commands/delivery.md` → `/delivery` with `$ARGUMENTS` | `.mcp.json` | Project or global |
 | **OpenCode** | `opencode.json` → `/delivery` | Native local MCP entries in `opencode.json` | Project or global |
 | **Codex** | `AGENTS.md` + natural-language `docs/agent-workflow/delivery.md` instruction | Existing user-level MCP config is preserved | Project or global |
@@ -167,25 +190,28 @@ The installer registers the following local MCP servers where the target harness
 
 | System | Package | Purpose |
 | --- | --- | --- |
-| Jira | `mcp-atlassian` via `uvx` | Read stories, acceptance criteria, and business rules. |
+| Jira | `mcp-atlassian@0.23.0` via `uvx` | Read stories, acceptance criteria, and business rules. |
 | GitLab | `@zereight/mcp-gitlab` via `npx` | Create technical issues, dependency links, and merge requests after confirmation. |
 | Browser | `chrome-devtools-mcp` via `npx` | Exercise UI acceptance flows, check console/network errors, and capture evidence. |
 
 Existing MCP entries are preserved when configuration files are merged.
 
+Pi does not load `.pi/mcp.json` natively. For Pi installations, the harness also adds `npm:pi-mcp-adapter@2.23.0` to the applicable `.pi/settings.json`; Pi installs and loads that package on restart. The adapter deliberately exposes one lazy `mcp` proxy tool instead of adding every remote tool to the model context. Workflow prompts discover Jira with `mcp({ server: "jira" })` or MCP search, then invoke the returned tool through the same proxy.
+
 ## Secrets and environment variables
 
-Repository configuration contains references only — never API tokens. Configure these values in your user environment or secret manager:
+Repository configuration may contain the non-secret Jira and GitLab endpoint URLs, but never API tokens. Tokens remain environment-variable references. Configure these values in your user environment or secret manager:
 
 ```text
 JIRA_URL
 JIRA_USERNAME
 JIRA_API_TOKEN
+JIRA_PERSONAL_TOKEN
 GITLAB_API_URL
 GITLAB_PERSONAL_ACCESS_TOKEN
 ```
 
-On Windows, the interactive installer can save supplied values as user-level environment variables. The GitLab value is normalized to the required API endpoint format, for example `https://gitlab.example.com/api/v4`. Restart the terminal or harness after installation so it receives the updated values. For CI and macOS/Linux, inject the values through your platform's normal secret-management mechanism.
+On Windows, the interactive installer can save supplied values as user-level environment variables. Select **Atlassian Cloud** to use `JIRA_USERNAME` + `JIRA_API_TOKEN`, or **Server / Data Center** to use `JIRA_PERSONAL_TOKEN`; the wizard defaults from the Jira hostname but lets you override it. The GitLab value is normalized to the required API endpoint format, for example `https://gitlab.example.com/api/v4`. Restart the terminal or harness after installation so it receives the updated values. For CI and macOS/Linux, inject the values through your platform's normal secret-management mechanism.
 
 ## Commands
 

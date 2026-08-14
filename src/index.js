@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import os from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as prompts from "@clack/prompts";
@@ -19,6 +20,7 @@ const SCOPE_CHOICES = [
   { value: "global", label: "Global", hint: "Every local project" }
 ];
 const MATT_POCOCK_SKILL_MODES = ["workflow", "all", "none"];
+const JIRA_AUTH_MODES = ["cloud", "pat"];
 
 class InstallationCancelled extends Error {}
 
@@ -27,14 +29,17 @@ function help() {
 
 Commands:
   init       Interactively install the guarded delivery workflow.
+  update     Upgrade an existing workflow without replacing secrets or custom configuration.
   uninstall  Interactively remove workflow files created by this package.
-  doctor     Show the prerequisites the installer checks.
+  doctor     Diagnose an existing installation; use --fix to repair it.
 
-Options for init:
+Options:
   --harness <pi|claude-code|codex|opencode>
   --scope <project|global>                 Default: project
   --matt-pocock-skills <workflow|all|none> Default with --yes: none
+  --jira-auth <cloud|pat>                  Default: inferred from JIRA_URL
   --with-matt-pocock-skills                Alias for --matt-pocock-skills workflow
+  --fix                                    Repair detected issues (doctor only)
   --dry-run                                Print planned files without writing
   --yes                                    Non-interactive; reads secret values from environment
   --help`;
@@ -47,10 +52,12 @@ function parseArgs(argv) {
   for (let index = 0; index < rest.length; index += 1) {
     const item = rest[index];
     if (item === "--dry-run") options.dryRun = true;
+    else if (item === "--fix") options.fix = true;
     else if (item === "--yes") options.yes = true;
     else if (item === "--with-matt-pocock-skills") options.mattPocockSkills = "workflow";
     else if (item === "--help" || item === "-h") options.help = true;
     else if (item === "--matt-pocock-skills") options.mattPocockSkills = rest[++index];
+    else if (item === "--jira-auth") options.jiraAuth = rest[++index];
     else if (item === "--harness" || item === "--scope") {
       options[item.slice(2)] = rest[++index];
     } else throw new Error(`Unknown option: ${item}`);
@@ -70,15 +77,120 @@ export function normalizeGitLabApiUrl(value = "") {
   return `${url}/api/v4`;
 }
 
+export function inferJiraAuthMode(value = "") {
+  try {
+    return new URL(value).hostname.toLowerCase().endsWith(".atlassian.net") ? "cloud" : "pat";
+  } catch {
+    return "cloud";
+  }
+}
+
+async function fileExists(file) {
+  try {
+    await fs.access(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readJson(file) {
+  try {
+    return JSON.parse(await fs.readFile(file, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return {};
+    throw new Error(`Cannot read ${file}: ${error.message}`);
+  }
+}
+
+async function readEnvironmentValue(key) {
+  if (process.env[key]) return process.env[key];
+  if (process.platform !== "win32") return "";
+  try {
+    const { stdout } = await execFileAsync("reg.exe", ["query", "HKCU\\Environment", "/v", key], { windowsHide: true });
+    const line = stdout.split(/\r?\n/).find((item) => item.trimStart().startsWith(key));
+    return line?.match(/\sREG_(?:SZ|EXPAND_SZ)\s+(.+)$/i)?.[1]?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function installedMarker({ harness, scope, cwd = process.cwd(), home = os.homedir() }) {
+  if (harness === "pi") {
+    const root = scope === "global" ? path.join(home, ".pi", "agent") : path.join(cwd, ".pi");
+    return path.join(root, "prompts", "delivery.md");
+  }
+  if (harness === "claude-code") {
+    const root = scope === "global" ? path.join(home, ".claude") : path.join(cwd, ".claude");
+    return path.join(root, "commands", "delivery.md");
+  }
+  if (harness === "codex") {
+    const root = scope === "global" ? home : cwd;
+    return path.join(root, "docs", "agent-workflow", "delivery.md");
+  }
+  return path.join(scope === "global" ? path.join(home, ".config", "opencode") : cwd, "opencode.json");
+}
+
+function mcpConfigPath({ harness, scope, cwd = process.cwd(), home = os.homedir() }) {
+  if (harness === "pi") {
+    return path.join(scope === "global" ? path.join(home, ".pi", "agent") : path.join(cwd, ".pi"), "mcp.json");
+  }
+  if (harness === "claude-code") {
+    return scope === "global" ? path.join(home, ".claude", ".mcp.json") : path.join(cwd, ".mcp.json");
+  }
+  if (harness === "opencode") {
+    return path.join(scope === "global" ? path.join(home, ".config", "opencode") : cwd, "opencode.json");
+  }
+  return "";
+}
+
+export async function detectInstalledHarnesses({ scope = "project", cwd = process.cwd(), home = os.homedir() } = {}) {
+  if (!SCOPE_CHOICES.some((choice) => choice.value === scope)) throw new Error(`Unsupported scope: ${scope}`);
+  const detected = [];
+  for (const { value: harness } of HARNESS_CHOICES) {
+    const marker = installedMarker({ harness, scope, cwd, home });
+    if (!(await fileExists(marker))) continue;
+    if (harness === "opencode") {
+      const config = await readJson(marker);
+      if (!config.command?.delivery?.description?.includes("guarded Jira-to-GitLab")) continue;
+    }
+    detected.push(harness);
+  }
+  return detected;
+}
+
+function literalConfigValue(value = "") {
+  if (typeof value !== "string" || !value) return "";
+  if (/^\$\{[A-Z0-9_]+\}$/.test(value) || /^\{env:[A-Z0-9_]+\}$/.test(value)) return "";
+  return value;
+}
+
+async function resolveInstalledConfiguration({ harness, scope, cwd = process.cwd(), home = os.homedir(), jiraAuth }) {
+  const configFile = mcpConfigPath({ harness, scope, cwd, home });
+  const config = configFile ? await readJson(configFile) : {};
+  const jira = config.mcp?.jira ?? config.mcpServers?.jira ?? {};
+  const gitlab = config.mcp?.gitlab ?? config.mcpServers?.gitlab ?? {};
+  const jiraEnvironment = jira.environment ?? jira.env ?? {};
+  const gitLabEnvironment = gitlab.environment ?? gitlab.env ?? {};
+  const jiraUrl = literalConfigValue(jiraEnvironment.JIRA_URL) || await readEnvironmentValue("JIRA_URL");
+  const gitLabApiUrl = normalizeGitLabApiUrl(literalConfigValue(gitLabEnvironment.GITLAB_API_URL) || await readEnvironmentValue("GITLAB_API_URL"));
+  const jiraAuthMode = jiraAuth
+    ?? ("JIRA_PERSONAL_TOKEN" in jiraEnvironment ? "pat" : inferJiraAuthMode(jiraUrl));
+  return { jiraAuthMode, jiraUrl, gitLabApiUrl };
+}
+
 async function collectOptions(options) {
   if (options.yes) {
     if (!options.harness) throw new Error("--yes requires --harness.");
     const mattPocockSkills = options.mattPocockSkills ?? "none";
     if (!MATT_POCOCK_SKILL_MODES.includes(mattPocockSkills)) throw new Error("Choose workflow, all, or none for --matt-pocock-skills.");
+    const jiraAuthMode = options.jiraAuth ?? inferJiraAuthMode(process.env.JIRA_URL);
+    if (!JIRA_AUTH_MODES.includes(jiraAuthMode)) throw new Error("Choose cloud or pat for --jira-auth.");
     return {
       ...options,
       scope: options.scope ?? "project",
-      mattPocockSkills
+      mattPocockSkills,
+      jiraAuthMode
     };
   }
   const harness = options.harness ?? unwrapPrompt(await prompts.select({
@@ -109,27 +221,55 @@ async function collectOptions(options) {
     ],
     initialValue: true
   }));
-  const gitLabApiUrl = configureSecrets ? unwrapPrompt(await prompts.text({
-    message: "GitLab API URL",
-    placeholder: "https://gitlab.example.com/api/v4",
-    initialValue: normalizeGitLabApiUrl(process.env.GITLAB_API_URL)
-  })) : undefined;
-  const secrets = configureSecrets ? {
-    JIRA_URL: unwrapPrompt(await prompts.text({
+  let jiraAuthMode = options.jiraAuth ?? inferJiraAuthMode(process.env.JIRA_URL);
+  let secrets;
+  if (configureSecrets) {
+    const jiraUrl = unwrapPrompt(await prompts.text({
       message: "Jira URL",
       placeholder: "https://jira.example.com",
       initialValue: process.env.JIRA_URL
-    })),
-    JIRA_USERNAME: unwrapPrompt(await prompts.text({
-      message: "Jira username or email",
-      placeholder: "you@example.com",
-      initialValue: process.env.JIRA_USERNAME
-    })),
-    JIRA_API_TOKEN: unwrapPrompt(await prompts.password({ message: "Jira API token", mask: "*" })),
-    GITLAB_API_URL: normalizeGitLabApiUrl(gitLabApiUrl),
-    GITLAB_PERSONAL_ACCESS_TOKEN: unwrapPrompt(await prompts.password({ message: "GitLab personal access token", mask: "*" }))
-  } : undefined;
-  return { ...options, harness, scope, mattPocockSkills, secrets };
+    }));
+    jiraAuthMode = options.jiraAuth ?? unwrapPrompt(await prompts.select({
+      message: "Jira deployment and authentication",
+      options: [
+        { value: "cloud", label: "Atlassian Cloud", hint: "Email + Jira API token" },
+        { value: "pat", label: "Server / Data Center", hint: "Jira personal access token (PAT)" }
+      ],
+      initialValue: inferJiraAuthMode(jiraUrl)
+    }));
+    const jiraCredentials = jiraAuthMode === "pat"
+      ? { JIRA_PERSONAL_TOKEN: unwrapPrompt(await prompts.password({ message: "Jira personal access token", mask: "*" })) }
+      : {
+          JIRA_USERNAME: unwrapPrompt(await prompts.text({
+            message: "Jira username or email",
+            placeholder: "you@example.com",
+            initialValue: process.env.JIRA_USERNAME
+          })),
+          JIRA_API_TOKEN: unwrapPrompt(await prompts.password({ message: "Jira API token", mask: "*" }))
+        };
+    const gitLabApiUrl = unwrapPrompt(await prompts.text({
+      message: "GitLab API URL",
+      placeholder: "https://gitlab.example.com/api/v4",
+      initialValue: normalizeGitLabApiUrl(process.env.GITLAB_API_URL)
+    }));
+    secrets = {
+      JIRA_URL: jiraUrl,
+      ...jiraCredentials,
+      GITLAB_API_URL: normalizeGitLabApiUrl(gitLabApiUrl),
+      GITLAB_PERSONAL_ACCESS_TOKEN: unwrapPrompt(await prompts.password({ message: "GitLab personal access token", mask: "*" }))
+    };
+  } else if (!options.jiraAuth) {
+    jiraAuthMode = unwrapPrompt(await prompts.select({
+      message: "Jira deployment and authentication to configure later",
+      options: [
+        { value: "cloud", label: "Atlassian Cloud", hint: "JIRA_USERNAME + JIRA_API_TOKEN" },
+        { value: "pat", label: "Server / Data Center", hint: "JIRA_PERSONAL_TOKEN" }
+      ],
+      initialValue: inferJiraAuthMode(process.env.JIRA_URL)
+    }));
+  }
+  if (!JIRA_AUTH_MODES.includes(jiraAuthMode)) throw new Error("Choose cloud or pat for --jira-auth.");
+  return { ...options, harness, scope, mattPocockSkills, jiraAuthMode, secrets };
 }
 
 export function mattPocockSkillsInstallArgs({ harness, scope, mode = "workflow" }) {
@@ -188,6 +328,7 @@ async function applyPlan(plan, dryRun) {
     let existing = "";
     try { existing = await fs.readFile(write.file, "utf8"); } catch (error) { if (error.code !== "ENOENT") throw error; }
     const output = mergeWrite(existing, write);
+    if (output === existing) continue;
     if (dryRun) {
       files.add(write.file);
       continue;
@@ -256,13 +397,16 @@ async function init(options) {
       harness: selected.harness,
       scope: selected.scope,
       cwd: process.cwd(),
-      includeMattPocockSetup: selected.mattPocockSkills !== "none"
+      includeMattPocockSetup: selected.mattPocockSkills !== "none",
+      jiraAuthMode: selected.jiraAuthMode,
+      jiraUrl: selected.secrets?.JIRA_URL ?? process.env.JIRA_URL,
+      gitLabApiUrl: selected.secrets?.GITLAB_API_URL ?? normalizeGitLabApiUrl(process.env.GITLAB_API_URL)
     });
     if (interactive) {
       const skillSummary = selected.mattPocockSkills === "workflow"
         ? `${MATT_POCOCK_WORKFLOW_SKILLS.length} workflow skills`
         : selected.mattPocockSkills === "all" ? "all skills" : "not selected";
-      prompts.note(`Harness: ${selected.harness}\nScope: ${selected.scope}\nFiles: ${new Set(plan.writes.map((write) => write.file)).size}\nMatt Pocock skills: ${skillSummary}\nGitLab writes: none until you explicitly approve them.`, "Ready to install");
+      prompts.note(`Harness: ${selected.harness}\nScope: ${selected.scope}\nJira auth: ${selected.jiraAuthMode === "pat" ? "Server/Data Center PAT" : "Atlassian Cloud API token"}\nFiles: ${new Set(plan.writes.map((write) => write.file)).size}\nMatt Pocock skills: ${skillSummary}\nGitLab writes: none until you explicitly approve them.`, "Ready to install");
     }
 
     progress = interactive ? prompts.spinner() : undefined;
@@ -333,19 +477,139 @@ async function uninstall(options) {
   }
 }
 
-function doctor() {
+async function selectInstalledHarnesses(options) {
+  const scope = options.scope ?? "project";
+  if (!SCOPE_CHOICES.some((choice) => choice.value === scope)) throw new Error(`Unsupported scope: ${scope}`);
+  const detected = await detectInstalledHarnesses({ scope });
+  if (options.harness) {
+    if (!HARNESS_CHOICES.some((choice) => choice.value === options.harness)) throw new Error(`Unsupported harness: ${options.harness}`);
+    if (!detected.includes(options.harness)) {
+      throw new Error(`No ${options.harness} workflow installation was detected at ${scope} scope. Run init first.`);
+    }
+    return { scope, harnesses: [options.harness] };
+  }
+  if (detected.length === 0) throw new Error(`No coding-agent-harness installation was detected at ${scope} scope. Run init first or provide the correct --scope.`);
+  return { scope, harnesses: detected };
+}
+
+async function update(options, { doctorFix = false } = {}) {
+  const interactive = !options.yes && process.stdout.isTTY && !doctorFix;
+  const selected = await selectInstalledHarnesses(options);
+  if (interactive) {
+    prompts.intro("Coding Agent Harness — update");
+    prompts.note(`Harnesses: ${selected.harnesses.join(", ")}\nScope: ${selected.scope}\nSecrets: preserved`, "Detected installation");
+  }
+
+  const changed = [];
+  for (const harness of selected.harnesses) {
+    const runtime = await resolveInstalledConfiguration({
+      harness,
+      scope: selected.scope,
+      jiraAuth: options.jiraAuth
+    });
+    if (!JIRA_AUTH_MODES.includes(runtime.jiraAuthMode)) throw new Error(`Unsupported Jira authentication mode: ${runtime.jiraAuthMode}`);
+    const includeMattPocockSetup = selected.scope === "project"
+      && (await fileExists(path.join(process.cwd(), "docs", "agents")) || await fileExists(path.join(process.cwd(), ".agents")) || await fileExists(path.join(process.cwd(), "skills-lock.json")));
+    const plan = buildInstallPlan({
+      harness,
+      scope: selected.scope,
+      cwd: process.cwd(),
+      includeMattPocockSetup,
+      jiraAuthMode: runtime.jiraAuthMode,
+      jiraUrl: runtime.jiraUrl,
+      gitLabApiUrl: runtime.gitLabApiUrl
+    });
+    const files = await applyPlan(plan, options.dryRun);
+    changed.push(...files);
+    if (!interactive && !doctorFix) {
+      for (const file of files) console.log(`${options.dryRun ? "[dry-run] would update" : "updated"} ${file}`);
+    }
+  }
+
+  if (interactive) {
+    prompts.note([...new Set(changed)].map((file) => path.relative(process.cwd(), file) || path.basename(file)).join("\n") || "Already up to date.", options.dryRun ? "Planned updates" : "Updated files");
+    prompts.outro(options.dryRun ? "No files were changed." : "Workflow update complete. Restart or reload the harness.");
+  }
+  const files = [...new Set(changed)];
+  if (!interactive && !doctorFix && files.length === 0) console.log("Workflow is already up to date.");
+  return { ...selected, files };
+}
+
+async function commandAvailable(command) {
+  try {
+    if (process.platform === "win32") {
+      await execFileAsync("where.exe", [command.replace(/\.cmd$/i, "")], { windowsHide: true, timeout: 10000 });
+      return true;
+    }
+    await execFileAsync(command, ["--version"], { windowsHide: true, timeout: 10000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function doctor(options) {
+  const scope = options.scope ?? "project";
+  const npxAvailable = await commandAvailable(process.platform === "win32" ? "npx.cmd" : "npx");
+  const uvxAvailable = await commandAvailable("uvx");
   console.log(`Node: ${process.version}`);
   console.log(`Platform: ${process.platform}`);
-  console.log("Required runtimes: Node.js, npx; uvx is required when installing Jira MCP.");
-  console.log("Optional Matt Pocock skills install: the current skills CLI requires Node.js >=22.20.");
-  console.log("Required environment variables: JIRA_URL, JIRA_USERNAME, JIRA_API_TOKEN, GITLAB_API_URL, GITLAB_PERSONAL_ACCESS_TOKEN.");
+  console.log(`npx: ${npxAvailable ? "available" : "missing"}`);
+  console.log(`uvx: ${uvxAvailable ? "available" : "missing"}`);
+
+  let selected;
+  try {
+    selected = await selectInstalledHarnesses({ ...options, scope });
+  } catch (error) {
+    console.log(`Installation: not detected (${error.message})`);
+    if (options.fix) throw error;
+    return;
+  }
+
+  console.log(`Installation: ${selected.harnesses.join(", ")} (${scope})`);
+  const findings = [];
+  if (!npxAvailable) findings.push("runtime: npx is missing");
+  if (!uvxAvailable) findings.push("runtime: uvx is missing");
+  for (const harness of selected.harnesses) {
+    const runtime = await resolveInstalledConfiguration({ harness, scope, jiraAuth: options.jiraAuth });
+    const configFile = mcpConfigPath({ harness, scope });
+    const config = configFile ? await readJson(configFile) : {};
+    const jira = config.mcp?.jira ?? config.mcpServers?.jira;
+    if (harness !== "codex" && !jira) findings.push(`${harness}: Jira MCP server is missing`);
+    if (!runtime.jiraUrl) findings.push(`${harness}: Jira URL is unavailable to the current process/config`);
+    const requiredJiraToken = runtime.jiraAuthMode === "pat" ? "JIRA_PERSONAL_TOKEN" : "JIRA_API_TOKEN";
+    if (!(await readEnvironmentValue(requiredJiraToken))) findings.push(`${harness}: ${requiredJiraToken} is missing`);
+    if (runtime.jiraAuthMode === "cloud" && !(await readEnvironmentValue("JIRA_USERNAME"))) findings.push(`${harness}: JIRA_USERNAME is missing`);
+    if (harness === "pi") {
+      const root = scope === "global" ? path.join(os.homedir(), ".pi", "agent") : path.join(process.cwd(), ".pi");
+      const settings = await readJson(path.join(root, "settings.json"));
+      if (!settings.packages?.includes("npm:pi-mcp-adapter@2.23.0")) findings.push("pi: pi-mcp-adapter@2.23.0 is not registered in settings.json");
+    }
+  }
+  if (!(await readEnvironmentValue("GITLAB_PERSONAL_ACCESS_TOKEN"))) findings.push("GITLAB_PERSONAL_ACCESS_TOKEN is missing");
+
+  if (findings.length === 0) console.log("Status: healthy");
+  else {
+    console.log(`Status: ${findings.length} issue(s) detected`);
+    for (const finding of findings) console.log(`- ${finding}`);
+  }
+
+  if (!options.fix) {
+    console.log("Run doctor --fix to repair managed workflow and MCP configuration without changing secret values.");
+    return;
+  }
+  const result = await update({ ...options, yes: true, scope }, { doctorFix: true });
+  for (const file of result.files) console.log(`${options.dryRun ? "[dry-run] would repair" : "repaired"} ${file}`);
+  if (result.files.length === 0) console.log("No managed file changes were needed.");
+  console.log(options.dryRun ? "Doctor fix preview complete; no files were changed." : "Repair complete. Restart or reload the harness; in Pi run /mcp reconnect jira.");
 }
 
 export async function main(argv) {
   const options = parseArgs(argv);
   if (options.help || options.command === "help") { console.log(help()); return; }
-  if (options.command === "doctor") { doctor(); return; }
+  if (options.command === "doctor") { await doctor(options); return; }
   if (options.command === "init") { await init(options); return; }
+  if (options.command === "update") { await update(options); return; }
   if (options.command === "uninstall") { await uninstall(options); return; }
   throw new Error(`Unknown command: ${options.command}`);
 }

@@ -88,7 +88,9 @@ function defineCommand(description, argumentHint, template, { preferMattPocockSk
 }
 
 export function commandTemplateForHarness(command, harness) {
-  if (harness === "pi") return command.template.replaceAll("$ARGUMENTS", "$@");
+  if (harness === "pi") {
+    return `${command.template.replaceAll("$ARGUMENTS", "$@")}\n\nPi MCP access: Pi exposes MCP servers through the lazy \`mcp\` proxy tool rather than registering every Jira, GitLab, or browser tool directly. Use \`mcp({ server: "jira" })\` or \`mcp({ search: "relevant capability" })\` to discover the exact tool, then call it through \`mcp({ tool: "discovered-tool-name", args: { ... } })\`. Do not conclude that Jira is unavailable merely because no standalone Jira tools appear in the initial tool list.`;
+  }
   if (harness === "codex") {
     return command.template.replaceAll(
       "$ARGUMENTS",
@@ -247,23 +249,30 @@ Use the installed Jira → architecture → spec → GitLab → TDD/UI verificat
 Keep durable decisions in CONTEXT.md, docs/adr/, and docs/specs/. Report exact verification results; never claim a test or UI check that was not run.
 `;
 
-export function standardMcpServers() {
+export function standardMcpServers({ jiraAuthMode = "cloud", jiraUrl = "", gitLabApiUrl = "" } = {}) {
+  if (!["cloud", "pat"].includes(jiraAuthMode)) throw new Error(`Unsupported Jira authentication mode: ${jiraAuthMode}`);
+  const jiraEnv = jiraAuthMode === "pat"
+    ? {
+        JIRA_URL: jiraUrl || "${JIRA_URL}",
+        JIRA_PERSONAL_TOKEN: "${JIRA_PERSONAL_TOKEN}"
+      }
+    : {
+        JIRA_URL: jiraUrl || "${JIRA_URL}",
+        JIRA_USERNAME: "${JIRA_USERNAME}",
+        JIRA_API_TOKEN: "${JIRA_API_TOKEN}"
+      };
   return {
     jira: {
       command: "uvx",
-      args: ["mcp-atlassian"],
-      env: {
-        JIRA_URL: "${JIRA_URL}",
-        JIRA_USERNAME: "${JIRA_USERNAME}",
-        JIRA_API_TOKEN: "${JIRA_API_TOKEN}"
-      },
+      args: ["mcp-atlassian@0.23.0"],
+      env: jiraEnv,
       lifecycle: "lazy"
     },
     gitlab: {
       command: "npx",
       args: ["-y", "@zereight/mcp-gitlab@2.1.29"],
       env: {
-        GITLAB_API_URL: "${GITLAB_API_URL}",
+        GITLAB_API_URL: gitLabApiUrl || "${GITLAB_API_URL}",
         GITLAB_PERSONAL_ACCESS_TOKEN: "${GITLAB_PERSONAL_ACCESS_TOKEN}"
       },
       lifecycle: "lazy"

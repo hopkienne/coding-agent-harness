@@ -21,8 +21,26 @@ function joinAgentSkills(existing = "") {
   return `${existing.trimEnd()}\n${MATT_POCOCK_AGENT_SKILLS_BLOCK}`.trimStart();
 }
 
-function mergeServers(existing = {}) {
-  return { ...standardMcpServers(), ...existing };
+const JIRA_AUTH_ENV_KEYS = ["JIRA_USERNAME", "JIRA_API_TOKEN", "JIRA_PERSONAL_TOKEN"];
+
+function mergeManagedServer(existing = {}, generated = {}, name) {
+  const existingEnvironment = { ...(existing.env ?? existing.environment) };
+  if (name === "jira") for (const key of JIRA_AUTH_ENV_KEYS) delete existingEnvironment[key];
+  const generatedEnvironment = generated.env ?? generated.environment;
+  const environmentKey = "environment" in generated ? "environment" : "env";
+  return {
+    ...existing,
+    ...generated,
+    [environmentKey]: { ...existingEnvironment, ...generatedEnvironment }
+  };
+}
+
+function mergeServers(existing = {}, generated = standardMcpServers()) {
+  const merged = { ...existing };
+  for (const [name, server] of Object.entries(generated)) {
+    merged[name] = mergeManagedServer(existing[name], server, name);
+  }
+  return merged;
 }
 
 const GITIGNORE_START = "# >>> coding-agent-harness >>>";
@@ -41,7 +59,7 @@ function mergeGitignore(existing = "", entries = []) {
   return `${prefix}${prefix ? "\n\n" : ""}${GITIGNORE_START}\n${missing.join("\n")}\n${GITIGNORE_END}\n`;
 }
 
-export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = os.homedir(), includeMattPocockSetup = false }) {
+export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = os.homedir(), includeMattPocockSetup = false, jiraAuthMode = "cloud", jiraUrl = "", gitLabApiUrl = "" }) {
   if (!["pi", "claude-code", "opencode", "codex"].includes(harness)) {
     throw new Error(`Unsupported harness: ${harness}`);
   }
@@ -50,10 +68,12 @@ export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = o
   }
 
   const root = scope === "project" ? cwd : home;
+  const mcpServers = standardMcpServers({ jiraAuthMode, jiraUrl, gitLabApiUrl });
   const plan = { harness, scope, root, writes: [], notes: [] };
   const projectIgnoreEntries = new Set();
   const writeText = (file, content, kind = "text") => plan.writes.push({ file, content, kind });
   const writeJson = (file, value) => plan.writes.push({ file, value, kind: "json" });
+  const installPiPackage = (file, packageSource) => plan.writes.push({ file, packages: [packageSource], kind: "pi-settings" });
   const ignoreProjectPaths = (...entries) => {
     if (scope === "project") for (const entry of entries) projectIgnoreEntries.add(entry);
   };
@@ -67,17 +87,18 @@ export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = o
     const agentDir = scope === "global" ? path.join(home, ".pi", "agent") : path.join(cwd, ".pi");
     const instructionFile = scope === "global" ? path.join(agentDir, "AGENTS.md") : path.join(cwd, "AGENTS.md");
     writeCommandFiles(path.join(agentDir, "prompts"));
-    writeJson(path.join(agentDir, "mcp.json"), { mcpServers: standardMcpServers() });
+    installPiPackage(path.join(agentDir, "settings.json"), "npm:pi-mcp-adapter@2.23.0");
+    writeJson(path.join(agentDir, "mcp.json"), { mcpServers });
     writeText(instructionFile, WORKFLOW_INSTRUCTIONS, "instructions");
     ignoreProjectPaths("/.pi/", "/AGENTS.md");
-    plan.notes.push("Restart Pi or run /reload. Commands installed: /delivery, /grill-with-docs, /wayfinder, /to-spec, /to-tickets, /implement, /tdd, /verify-ui, /code-review, /create-mr, /diagnosing-bugs, /improve-codebase-architecture.");
+    plan.notes.push("Restart Pi so it installs/loads npm:pi-mcp-adapter@2.23.0, then use /delivery. Pi exposes Jira, GitLab, and browser capabilities through its single lazy mcp proxy tool. Commands installed: /delivery, /grill-with-docs, /wayfinder, /to-spec, /to-tickets, /implement, /tdd, /verify-ui, /code-review, /create-mr, /diagnosing-bugs, /improve-codebase-architecture.");
   }
 
   if (harness === "claude-code") {
     const claudeDir = scope === "global" ? path.join(home, ".claude") : path.join(cwd, ".claude");
     const instructionFile = scope === "global" ? path.join(claudeDir, "CLAUDE.md") : path.join(cwd, "CLAUDE.md");
     writeCommandFiles(path.join(claudeDir, "commands"));
-    writeJson(path.join(scope === "global" ? claudeDir : cwd, ".mcp.json"), { mcpServers: standardMcpServers() });
+    writeJson(path.join(scope === "global" ? claudeDir : cwd, ".mcp.json"), { mcpServers });
     writeText(instructionFile, WORKFLOW_INSTRUCTIONS, "instructions");
     ignoreProjectPaths("/.claude/", "/.mcp.json", "/CLAUDE.md");
     plan.notes.push("Restart Claude Code. Commands installed: /delivery, /grill-with-docs, /wayfinder, /to-spec, /to-tickets, /implement, /tdd, /verify-ui, /code-review, /create-mr, /diagnosing-bugs, /improve-codebase-architecture.");
@@ -92,10 +113,13 @@ export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = o
         description: command.description,
         template: commandTemplateForHarness(command, harness)
       }])),
-      mcp: Object.fromEntries(Object.entries(standardMcpServers()).map(([name, server]) => [name, {
+      mcp: Object.fromEntries(Object.entries(mcpServers).map(([name, server]) => [name, {
         type: "local",
         command: [server.command, ...server.args],
-        environment: Object.fromEntries(Object.keys(server.env ?? {}).map((key) => [key, `{env:${key}}`])),
+        environment: Object.fromEntries(Object.entries(server.env ?? {}).map(([key, value]) => [
+          key,
+          value === `\${${key}}` ? `{env:${key}}` : value
+        ])),
         disabled: false
       }]))
     });
@@ -186,6 +210,11 @@ export function buildUninstallPlan({ harness, scope, cwd = process.cwd(), home =
 
 export function mergeWrite(existing, write) {
   if (write.kind === "gitignore") return mergeGitignore(existing, write.entries);
+  if (write.kind === "pi-settings") {
+    const current = existing?.trim() ? JSON.parse(existing) : {};
+    const packages = Array.isArray(current.packages) ? current.packages : [];
+    return JSON.stringify({ ...current, packages: [...new Set([...packages, ...write.packages])] }, null, 2) + "\n";
+  }
   if (write.kind === "json") {
     const current = existing?.trim() ? JSON.parse(existing) : {};
     if (write.file.endsWith("opencode.json")) {
@@ -194,15 +223,13 @@ export function mergeWrite(existing, write) {
         const existingServer = current.mcp?.[name] ?? {};
         const { enabled, ...withoutLegacyEnabled } = existingServer;
         mcp[name] = {
-          ...server,
-          ...withoutLegacyEnabled,
-          environment: { ...server.environment, ...withoutLegacyEnabled.environment },
+          ...mergeManagedServer(withoutLegacyEnabled, server, name),
           disabled: withoutLegacyEnabled.disabled ?? (enabled === false)
         };
       }
       return JSON.stringify({ ...current, ...write.value, command: { ...current.command, ...write.value.command }, mcp }, null, 2) + "\n";
     }
-    return JSON.stringify({ ...current, mcpServers: mergeServers(current.mcpServers) }, null, 2) + "\n";
+    return JSON.stringify({ ...current, ...write.value, mcpServers: mergeServers(current.mcpServers, write.value.mcpServers) }, null, 2) + "\n";
   }
   if (write.kind === "instructions") return joinInstructions(existing);
   if (write.kind === "agent-skills") return joinAgentSkills(existing);

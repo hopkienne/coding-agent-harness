@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -11,6 +11,7 @@ import {
   MATT_POCOCK_WORKFLOW_SKILLS,
   mattPocockSkillsInstallArgs,
   mattPocockSkillsInstaller,
+  inferJiraAuthMode,
   mergeWrite,
   normalizeGitLabApiUrl,
   removeManagedContent
@@ -20,18 +21,34 @@ const execFileAsync = promisify(execFile);
 
 test("Pi project plan installs a delivery prompt, MCP config, and instructions", () => {
   const plan = buildInstallPlan({ harness: "pi", scope: "project", cwd: "C:/repo", home: "C:/user" });
-  assert.equal(plan.writes.length, 15);
+  assert.equal(plan.writes.length, 16);
   assert.ok(plan.writes.some((write) => write.file.endsWith("delivery.md") && write.file.includes(".pi")));
   assert.ok(plan.writes.some((write) => write.file.endsWith("grill-with-docs.md") && write.file.includes(".pi")));
   assert.ok(plan.writes.some((write) => write.file.endsWith("wayfinder.md") && write.file.includes(".pi")));
   assert.ok(plan.writes.some((write) => write.file.endsWith("mcp.json") && write.file.includes(".pi")));
+  const settings = plan.writes.find((write) => write.file.endsWith("settings.json"));
+  assert.deepEqual(settings.packages, ["npm:pi-mcp-adapter@2.23.0"]);
   assert.ok(plan.writes.some((write) => write.file.endsWith("AGENTS.md")));
   const delivery = plan.writes.find((write) => write.file.endsWith("delivery.md"));
   assert.ok(delivery.content.includes("Full user request:\n$@"));
   assert.equal(delivery.content.includes("$ARGUMENTS"), false);
   assert.ok(delivery.content.includes("requested response language"));
+  assert.ok(delivery.content.includes("lazy `mcp` proxy tool"));
+  assert.ok(delivery.content.includes('mcp({ server: "jira" })'));
   const gitignore = plan.writes.find((write) => write.file.endsWith(".gitignore"));
   assert.deepEqual(gitignore.entries, ["/.pi/", "/AGENTS.md"]);
+});
+
+test("Pi settings merge registers the MCP adapter without losing user packages", () => {
+  const write = buildInstallPlan({ harness: "pi", scope: "project", cwd: "C:/repo", home: "C:/user" })
+    .writes.find((item) => item.kind === "pi-settings");
+  const once = mergeWrite(JSON.stringify({ theme: "dark", packages: ["npm:existing-pi-package"] }), write);
+  const twice = mergeWrite(once, write);
+  assert.equal(twice, once);
+  assert.deepEqual(JSON.parse(once), {
+    theme: "dark",
+    packages: ["npm:existing-pi-package", "npm:pi-mcp-adapter@2.23.0"]
+  });
 });
 
 test("OpenCode adapter emits native command and local MCP configuration", () => {
@@ -88,6 +105,34 @@ test("Matt Pocock installation also bootstraps repository configuration without 
   assert.ok(gitignore.entries.includes("/docs/agents/"));
 });
 
+test("Jira authentication mode is inferred and rendered for Cloud or Server/Data Center", () => {
+  assert.equal(inferJiraAuthMode("https://example.atlassian.net"), "cloud");
+  assert.equal(inferJiraAuthMode("https://jira.gapit.com.vn"), "pat");
+  const plan = buildInstallPlan({ harness: "pi", scope: "project", cwd: "C:/repo", home: "C:/user", jiraAuthMode: "pat", jiraUrl: "https://jira.gapit.com.vn" });
+  const config = plan.writes.find((write) => write.file.endsWith("mcp.json")).value;
+  assert.equal(config.mcpServers.jira.env.JIRA_URL, "https://jira.gapit.com.vn");
+  assert.equal(config.mcpServers.jira.env.JIRA_PERSONAL_TOKEN, "${JIRA_PERSONAL_TOKEN}");
+  assert.equal("JIRA_API_TOKEN" in config.mcpServers.jira.env, false);
+  assert.equal("JIRA_USERNAME" in config.mcpServers.jira.env, false);
+});
+
+test("OpenCode embeds non-secret service URLs but keeps tokens in environment variables", () => {
+  const plan = buildInstallPlan({
+    harness: "opencode",
+    scope: "project",
+    cwd: "C:/repo",
+    home: "C:/user",
+    jiraAuthMode: "pat",
+    jiraUrl: "https://jira.gapit.com.vn",
+    gitLabApiUrl: "https://gitlab.gapit.com.vn/api/v4"
+  });
+  const config = plan.writes.find((write) => write.file.endsWith("opencode.json")).value;
+  assert.equal(config.mcp.jira.environment.JIRA_URL, "https://jira.gapit.com.vn");
+  assert.equal(config.mcp.jira.environment.JIRA_PERSONAL_TOKEN, "{env:JIRA_PERSONAL_TOKEN}");
+  assert.equal(config.mcp.gitlab.environment.GITLAB_API_URL, "https://gitlab.gapit.com.vn/api/v4");
+  assert.equal(config.mcp.gitlab.environment.GITLAB_PERSONAL_ACCESS_TOKEN, "{env:GITLAB_PERSONAL_ACCESS_TOKEN}");
+});
+
 test("Claude Code delivery command receives the entire natural-language request", () => {
   const plan = buildInstallPlan({ harness: "claude-code", scope: "project", cwd: "C:/repo", home: "C:/user" });
   const delivery = plan.writes.find((write) => write.file.replaceAll("\\", "/").endsWith(".claude/commands/delivery.md"));
@@ -135,13 +180,25 @@ test("MCP merge preserves unrelated server configuration", () => {
   assert.equal(merged.mcpServers.gitlab.command, "npx");
 });
 
-test("MCP merge preserves an existing managed server", () => {
+test("MCP merge upgrades an existing managed server", () => {
   const content = mergeWrite(JSON.stringify({ mcpServers: { gitlab: { command: "custom-gitlab" } } }), {
     file: "mcp.json",
     kind: "json",
-    value: {}
+    value: { mcpServers: buildInstallPlan({ harness: "pi", scope: "project", cwd: "C:/repo", home: "C:/user" }).writes.find((write) => write.file.endsWith("mcp.json")).value.mcpServers }
   });
-  assert.equal(JSON.parse(content).mcpServers.gitlab.command, "custom-gitlab");
+  assert.equal(JSON.parse(content).mcpServers.gitlab.command, "npx");
+});
+
+test("MCP merge removes stale Jira Cloud credentials when switching to PAT", () => {
+  const write = buildInstallPlan({ harness: "pi", scope: "project", cwd: "C:/repo", home: "C:/user", jiraAuthMode: "pat" })
+    .writes.find((item) => item.file.endsWith("mcp.json"));
+  const content = mergeWrite(JSON.stringify({ mcpServers: { jira: { command: "uvx", env: {
+    JIRA_URL: "${JIRA_URL}", JIRA_USERNAME: "${JIRA_USERNAME}", JIRA_API_TOKEN: "${JIRA_API_TOKEN}"
+  } } } }), write);
+  const env = JSON.parse(content).mcpServers.jira.env;
+  assert.equal(env.JIRA_PERSONAL_TOKEN, "${JIRA_PERSONAL_TOKEN}");
+  assert.equal("JIRA_API_TOKEN" in env, false);
+  assert.equal("JIRA_USERNAME" in env, false);
 });
 
 test("OpenCode MCP merge upgrades legacy enabled flags to disabled flags", () => {
@@ -208,6 +265,69 @@ test("OpenCode installation creates a working project configuration without secr
     assert.equal("command" in afterUninstall, false);
     assert.ok(afterUninstall.mcp.gitlab);
     assert.equal((await readFile(path.join(workspace, "AGENTS.md"), "utf8")).includes("## Guarded delivery workflow"), false);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("update upgrades an existing Pi workflow and preserves unrelated settings", async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), "coding-agent-harness-pi-update-"));
+  const cli = path.resolve("bin/coding-agent-harness.js");
+  try {
+    await execFileAsync(process.execPath, [cli, "init", "--harness", "pi", "--scope", "project", "--jira-auth", "cloud", "--yes"], {
+      cwd: workspace,
+      env: { ...process.env, JIRA_URL: "https://jira.gapit.com.vn", GITLAB_API_URL: "https://gitlab.gapit.com.vn/api/v4" }
+    });
+    await writeFile(path.join(workspace, ".pi", "settings.json"), JSON.stringify({ theme: "custom", packages: ["npm:existing"] }), "utf8");
+    await execFileAsync(process.execPath, [cli, "update", "--harness", "pi", "--scope", "project", "--jira-auth", "pat", "--yes"], {
+      cwd: workspace,
+      env: { ...process.env, JIRA_URL: "https://jira.gapit.com.vn", GITLAB_API_URL: "https://gitlab.gapit.com.vn/api/v4" }
+    });
+    const mcp = JSON.parse(await readFile(path.join(workspace, ".pi", "mcp.json"), "utf8"));
+    const settings = JSON.parse(await readFile(path.join(workspace, ".pi", "settings.json"), "utf8"));
+    assert.equal(mcp.mcpServers.jira.env.JIRA_URL, "https://jira.gapit.com.vn");
+    assert.equal(mcp.mcpServers.jira.env.JIRA_PERSONAL_TOKEN, "${JIRA_PERSONAL_TOKEN}");
+    assert.equal("JIRA_API_TOKEN" in mcp.mcpServers.jira.env, false);
+    assert.equal(settings.theme, "custom");
+    assert.deepEqual(settings.packages, ["npm:existing", "npm:pi-mcp-adapter@2.23.0"]);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("doctor --fix repairs a legacy Pi Jira Cloud/PAT mismatch", async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), "coding-agent-harness-pi-doctor-"));
+  const cli = path.resolve("bin/coding-agent-harness.js");
+  try {
+    await mkdir(path.join(workspace, ".pi", "prompts"), { recursive: true });
+    await writeFile(path.join(workspace, ".pi", "prompts", "delivery.md"), "legacy delivery\n", "utf8");
+    await writeFile(path.join(workspace, ".pi", "mcp.json"), JSON.stringify({
+      mcpServers: {
+        jira: {
+          command: "uvx",
+          args: ["mcp-atlassian"],
+          env: {
+            JIRA_URL: "https://jira.gapit.com.vn",
+            JIRA_USERNAME: "${JIRA_USERNAME}",
+            JIRA_API_TOKEN: "${JIRA_API_TOKEN}"
+          }
+        }
+      }
+    }), "utf8");
+    await execFileAsync(process.execPath, [cli, "doctor", "--fix", "--harness", "pi", "--scope", "project", "--yes"], {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        JIRA_PERSONAL_TOKEN: "test-secret-not-written-to-config",
+        GITLAB_PERSONAL_ACCESS_TOKEN: "test-secret-not-written-to-config"
+      }
+    });
+    const mcp = JSON.parse(await readFile(path.join(workspace, ".pi", "mcp.json"), "utf8"));
+    const settings = JSON.parse(await readFile(path.join(workspace, ".pi", "settings.json"), "utf8"));
+    assert.equal(mcp.mcpServers.jira.args[0], "mcp-atlassian@0.23.0");
+    assert.deepEqual(Object.keys(mcp.mcpServers.jira.env).sort(), ["JIRA_PERSONAL_TOKEN", "JIRA_URL"]);
+    assert.equal(mcp.mcpServers.jira.env.JIRA_PERSONAL_TOKEN, "${JIRA_PERSONAL_TOKEN}");
+    assert.ok(settings.packages.includes("npm:pi-mcp-adapter@2.23.0"));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
