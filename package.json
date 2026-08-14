@@ -1,0 +1,41 @@
+{
+  "name": "@hopkienne/coding-agent-harness",
+  "version": "0.1.0",
+  "description": "Install a guarded Jira-to-GitLab delivery workflow into coding-agent harnesses.",
+  "type": "module",
+  "bin": {
+    "coding-agent-harness": "bin/coding-agent-harness.js"
+  },
+  "exports": "./src/index.js",
+  "files": [
+    "assets",
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "start": "node bin/coding-agent-harness.js"
+  },
+  "keywords": [
+    "coding-agent",
+    "harness",
+    "jira",
+    "gitlab",
+    "mcp",
+    "sdlc"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hopkienne/coding-agent-harness.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hopkienne/coding-agent-harness/issues"
+  },
+  "homepage": "https://github.com/hopkienne/coding-agent-harness#readme"
+}
