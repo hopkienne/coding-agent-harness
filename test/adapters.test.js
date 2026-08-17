@@ -141,20 +141,31 @@ test("Google Docs opt-in emits a pinned read-only MCP server", () => {
   assert.equal(openCodeConfig.mcp["google-docs"].disabled, false);
 });
 
-test("Codex Google Docs MCP merge is project-scoped, additive, and idempotent", () => {
+test("Codex adapter installs the complete guarded MCP set, preserves unrelated MCPs, and is idempotent", () => {
   const plan = buildInstallPlan({
     harness: "codex",
     scope: "project",
     cwd: "C:/repo",
     home: "C:/user",
-    includeGoogleDocs: true
+    includeGoogleDocs: true,
+    jiraAuthMode: "pat",
+    jiraUrl: "https://jira.example.com",
+    gitLabApiUrl: "https://gitlab.example.com/api/v4"
   });
   const write = plan.writes.find((item) => item.kind === "codex-mcp");
   assert.equal(write.file.replaceAll("\\", "/"), "C:/repo/.codex/config.toml");
-  const once = mergeWrite("model = \"gpt-5\"\n", write);
+  const once = mergeWrite("model = \"gpt-5\"\n\n[mcp_servers.custom]\nurl = \"https://mcp.example.com\"\n", write);
   const twice = mergeWrite(once, write);
   assert.equal(twice, once);
   assert.ok(once.includes("model = \"gpt-5\""));
+  assert.ok(once.includes("[mcp_servers.custom]"));
+  assert.ok(once.includes('[mcp_servers."jira"]'));
+  assert.ok(once.includes('env_vars = ["JIRA_PERSONAL_TOKEN"]'));
+  assert.ok(once.includes('JIRA_URL = "https://jira.example.com"'));
+  assert.ok(once.includes('[mcp_servers."gitlab"]'));
+  assert.ok(once.includes('env_vars = ["GITLAB_PERSONAL_ACCESS_TOKEN"]'));
+  assert.ok(once.includes('GITLAB_API_URL = "https://gitlab.example.com/api/v4"'));
+  assert.ok(once.includes('[mcp_servers."chrome-devtools"]'));
   assert.ok(once.includes('[mcp_servers."google-docs"]'));
   assert.equal(once.includes("GOOGLE_DRIVE_OAUTH_CREDENTIALS"), false);
   assert.ok(once.includes('enabled_tools = ["authGetStatus", "getFileMetadata", "readGoogleDoc", "readGoogleDocPaginated"]'));
@@ -571,29 +582,72 @@ test("doctor --fix repairs a legacy Pi Jira Cloud/PAT mismatch", async () => {
   }
 });
 
-test("doctor reads project-scoped Codex Google Docs TOML without treating it as JSON", async () => {
+test("doctor reads and repairs the complete project-scoped Codex MCP TOML without treating it as JSON", async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), "coding-agent-harness-codex-doctor-"));
   const cli = path.resolve("bin/coding-agent-harness.js");
   try {
     const plan = buildInstallPlan({ harness: "codex", scope: "project", cwd: workspace, home: workspace, includeGoogleDocs: true });
-    for (const write of plan.writes.filter((item) => item.kind !== "gitignore")) {
+    for (const write of plan.writes.filter((item) => item.kind !== "gitignore" && item.kind !== "codex-mcp")) {
       await mkdir(path.dirname(write.file), { recursive: true });
       await writeFile(write.file, mergeWrite("", write), "utf8");
     }
+    const codexWrite = plan.writes.find((item) => item.kind === "codex-mcp");
+    const legacyGoogleOnly = { ...codexWrite, servers: { "google-docs": codexWrite.servers["google-docs"] } };
+    await mkdir(path.dirname(codexWrite.file), { recursive: true });
+    await writeFile(codexWrite.file, mergeWrite("", legacyGoogleOnly), "utf8");
     const credentials = path.join(workspace, "oauth.json");
     const token = path.join(workspace, "tokens.json");
-    await writeFile(credentials, "{}", "utf8");
+    await writeFile(credentials, JSON.stringify({
+      installed: { client_id: "example.apps.googleusercontent.com", client_secret: "test-secret" }
+    }), "utf8");
     await writeFile(token, "{}", "utf8");
     const { stdout } = await execFileAsync(process.execPath, [cli, "doctor", "--harness", "codex", "--scope", "project", "--yes"], {
       cwd: workspace,
       env: {
         ...process.env,
+        JIRA_URL: "https://jira.example.com",
+        JIRA_USERNAME: "user@example.com",
+        JIRA_API_TOKEN: "test-jira-token",
+        GITLAB_API_URL: "https://gitlab.example.com/api/v4",
+        GITLAB_PERSONAL_ACCESS_TOKEN: "test-gitlab-token",
         GOOGLE_DRIVE_OAUTH_CREDENTIALS: credentials,
         GOOGLE_DRIVE_MCP_TOKEN_PATH: token
       }
     });
     assert.ok(stdout.includes("Installation: codex (project)"));
+    assert.ok(stdout.includes("codex: Jira MCP server is missing"));
     assert.equal(stdout.includes("Cannot read"), false);
+    await execFileAsync(process.execPath, [cli, "doctor", "--fix", "--harness", "codex", "--scope", "project", "--yes"], {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        JIRA_URL: "https://jira.example.com",
+        JIRA_USERNAME: "user@example.com",
+        JIRA_API_TOKEN: "test-jira-token",
+        GITLAB_API_URL: "https://gitlab.example.com/api/v4",
+        GITLAB_PERSONAL_ACCESS_TOKEN: "test-gitlab-token",
+        GOOGLE_DRIVE_OAUTH_CREDENTIALS: credentials,
+        GOOGLE_DRIVE_MCP_TOKEN_PATH: token
+      }
+    });
+    const repaired = await readFile(codexWrite.file, "utf8");
+    assert.ok(repaired.includes('[mcp_servers."jira"]'));
+    assert.ok(repaired.includes('[mcp_servers."gitlab"]'));
+    assert.ok(repaired.includes('[mcp_servers."chrome-devtools"]'));
+    const { stdout: healthy } = await execFileAsync(process.execPath, [cli, "doctor", "--harness", "codex", "--scope", "project", "--yes"], {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        JIRA_URL: "https://jira.example.com",
+        JIRA_USERNAME: "user@example.com",
+        JIRA_API_TOKEN: "test-jira-token",
+        GITLAB_API_URL: "https://gitlab.example.com/api/v4",
+        GITLAB_PERSONAL_ACCESS_TOKEN: "test-gitlab-token",
+        GOOGLE_DRIVE_OAUTH_CREDENTIALS: credentials,
+        GOOGLE_DRIVE_MCP_TOKEN_PATH: token
+      }
+    });
+    assert.ok(healthy.includes("Status: healthy"));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

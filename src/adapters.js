@@ -192,18 +192,15 @@ export function buildInstallPlan({ harness, scope, cwd = process.cwd(), home = o
     const instructionFile = scope === "global" ? path.join(home, ".codex", "AGENTS.md") : path.join(cwd, "AGENTS.md");
     writeText(instructionFile, WORKFLOW_INSTRUCTIONS, "instructions");
     writeCommandFiles(path.join(root, "docs", "agent-workflow"));
-    if (includeGoogleDocs) {
-      writeText(
-        path.join(scope === "global" ? path.join(home, ".codex") : path.join(cwd, ".codex"), "config.toml"),
-        undefined,
-        "codex-mcp"
-      );
-      plan.writes.at(-1).servers = { "google-docs": mcpServers["google-docs"] };
-    }
-    ignoreProjectPaths("/AGENTS.md", "/docs/agent-workflow/", ...(includeGoogleDocs ? ["/.codex/"] : []));
-    plan.notes.push("Codex uses the installed AGENTS.md workflow. Execute the matching docs/agent-workflow/<command>.md instruction for the desired workflow step.");
-    if (includeGoogleDocs) plan.notes.push("The read-only Google Docs MCP server was added to Codex config.toml with a four-tool allowlist. Project-scoped MCP configuration requires a trusted Codex project.");
-    else plan.notes.push("Codex Jira, GitLab, and browser MCP registration is preserved; configure those shared integrations separately when needed.");
+    writeText(
+      path.join(scope === "global" ? path.join(home, ".codex") : path.join(cwd, ".codex"), "config.toml"),
+      undefined,
+      "codex-mcp"
+    );
+    plan.writes.at(-1).servers = mcpServers;
+    ignoreProjectPaths("/AGENTS.md", "/docs/agent-workflow/", "/.codex/");
+    plan.notes.push("Codex uses the installed AGENTS.md workflow. Give a natural-language delivery request, or execute the matching docs/agent-workflow/<command>.md instruction for a focused phase.");
+    plan.notes.push(`Jira, GitLab, and Chrome DevTools MCP servers were added to Codex config.toml. Project-scoped MCP configuration requires a trusted Codex project.${includeGoogleDocs ? " The read-only Google Docs server is limited to authentication status, metadata, and document-reading tools." : ""}`);
   }
 
   if (includeGoogleDocs) {

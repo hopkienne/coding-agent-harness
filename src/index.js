@@ -361,18 +361,46 @@ function literalConfigValue(value = "") {
   return value;
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function codexMcpSection(configText, serverName, suffix = "") {
+  const name = escapeRegExp(serverName);
+  const section = suffix ? `\\.${escapeRegExp(suffix)}` : "";
+  const header = `\\[mcp_servers\\.(?:${name}|[\"']${name}[\"'])${section}\\]`;
+  const match = configText.match(new RegExp(`^${header}[ \\t]*(?:\\r?\\n|$)([\\s\\S]*?)(?=^\\[mcp_servers\\.|\\Z)`, "m"));
+  return match?.[1] ?? "";
+}
+
+function codexMcpStaticEnvValue(configText, serverName, key) {
+  const env = codexMcpSection(configText, serverName, "env");
+  const value = env.match(new RegExp(`^${escapeRegExp(key)}\\s*=\\s*(\"(?:[^\"\\\\]|\\\\.)*\")\\s*$`, "m"))?.[1];
+  if (!value) return "";
+  try { return JSON.parse(value); } catch { return ""; }
+}
+
+function codexMcpServerExists(configText, serverName) {
+  const name = escapeRegExp(serverName);
+  return new RegExp(`^\\[mcp_servers\\.(?:${name}|[\"']${name}[\"'])\\][ \\t]*\\r?$`, "m").test(configText);
+}
+
 async function resolveInstalledConfiguration({ harness, scope, cwd = process.cwd(), home = os.homedir(), jiraAuth }) {
   const configFile = mcpConfigPath({ harness, scope, cwd, home });
   if (harness === "codex") {
     const configText = await readText(configFile);
-    const jiraUrl = await readEnvironmentValue("JIRA_URL");
+    const jiraSection = codexMcpSection(configText, "jira");
+    const jiraUrl = codexMcpStaticEnvValue(configText, "jira", "JIRA_URL") || await readEnvironmentValue("JIRA_URL");
+    const gitLabApiUrl = normalizeGitLabApiUrl(
+      codexMcpStaticEnvValue(configText, "gitlab", "GITLAB_API_URL") || await readEnvironmentValue("GITLAB_API_URL")
+    );
     const configuredGoogleCredentials = resolveUserPath(await readEnvironmentValue("GOOGLE_DRIVE_OAUTH_CREDENTIALS"), home);
-    const configuredGoogleAuthPort = configText.match(/^GOOGLE_DRIVE_MCP_AUTH_PORT\s*=\s*["'](\d+)["']/m)?.[1] ?? 3000;
+    const configuredGoogleAuthPort = codexMcpStaticEnvValue(configText, "google-docs", "GOOGLE_DRIVE_MCP_AUTH_PORT") || 3000;
     return {
-      jiraAuthMode: jiraAuth ?? inferJiraAuthMode(jiraUrl),
+      jiraAuthMode: jiraAuth ?? (jiraSection.includes("JIRA_PERSONAL_TOKEN") ? "pat" : inferJiraAuthMode(jiraUrl)),
       jiraUrl,
-      gitLabApiUrl: normalizeGitLabApiUrl(await readEnvironmentValue("GITLAB_API_URL")),
-      googleDocsEnabled: /^\[mcp_servers\.(?:google-docs|["']google-docs["'])\]/m.test(configText),
+      gitLabApiUrl,
+      googleDocsEnabled: codexMcpServerExists(configText, "google-docs"),
       googleDocsCredentialsPath: configuredGoogleCredentials && await fileExists(configuredGoogleCredentials)
         ? configuredGoogleCredentials
         : defaultGoogleCredentialsPath(home),
@@ -989,9 +1017,19 @@ async function doctor(options) {
     const runtime = await resolveInstalledConfiguration({ harness, scope, jiraAuth: options.jiraAuth });
     const configFile = mcpConfigPath({ harness, scope });
     const config = configFile && harness !== "codex" ? await readJson(configFile) : {};
+    const codexConfigText = configFile && harness === "codex" ? await readText(configFile) : "";
     const jira = config.mcp?.jira ?? config.mcpServers?.jira;
-    if (harness !== "codex" && !jira) findings.push(`${harness}: Jira MCP server is missing`);
+    const gitLab = config.mcp?.gitlab ?? config.mcpServers?.gitlab;
+    const browser = config.mcp?.["chrome-devtools"] ?? config.mcpServers?.["chrome-devtools"];
+    const hasServer = (name, server) => harness === "codex" ? codexMcpServerExists(codexConfigText, name) : Boolean(server);
+    if (!hasServer("jira", jira)) findings.push(`${harness}: Jira MCP server is missing`);
+    if (!hasServer("gitlab", gitLab)) findings.push(`${harness}: GitLab MCP server is missing`);
+    if (!hasServer("chrome-devtools", browser)) findings.push(`${harness}: Chrome DevTools MCP server is missing`);
+    if (runtime.googleDocsEnabled && !hasServer("google-docs", config.mcp?.["google-docs"] ?? config.mcpServers?.["google-docs"])) {
+      findings.push(`${harness}: Google Docs MCP server is missing`);
+    }
     if (!runtime.jiraUrl) findings.push(`${harness}: Jira URL is unavailable to the current process/config`);
+    if (!runtime.gitLabApiUrl) findings.push(`${harness}: GitLab API URL is unavailable to the current process/config`);
     const requiredJiraToken = runtime.jiraAuthMode === "pat" ? "JIRA_PERSONAL_TOKEN" : "JIRA_API_TOKEN";
     if (!(await readEnvironmentValue(requiredJiraToken))) findings.push(`${harness}: ${requiredJiraToken} is missing`);
     if (runtime.jiraAuthMode === "cloud" && !(await readEnvironmentValue("JIRA_USERNAME"))) findings.push(`${harness}: JIRA_USERNAME is missing`);

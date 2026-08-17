@@ -180,9 +180,9 @@ Neither command reinstalls third-party Matt Pocock skills or prints token values
 | **Pi** | `.pi/prompts/delivery.md` → `/delivery` with full-request `$@` expansion | Registers `npm:pi-mcp-adapter@2.23.0` and writes `.pi/mcp.json` | Project or global |
 | **Claude Code** | `.claude/commands/delivery.md` → `/delivery` with `$ARGUMENTS` | `.mcp.json` | Project or global |
 | **OpenCode** | `opencode.json` → `/delivery` | Native local MCP entries in `opencode.json` | Project or global |
-| **Codex** | `AGENTS.md` + natural-language `docs/agent-workflow/delivery.md` instruction | Optional Google Docs entry in project/global `.codex/config.toml`; other MCP config is preserved | Project or global |
+| **Codex** | `AGENTS.md` + natural-language `docs/agent-workflow/delivery.md` instruction | Managed Jira, GitLab, Chrome DevTools, and optional read-only Google Docs entries in project/global `.codex/config.toml` | Project or global |
 
-For Codex, project installations write only a marked Google Docs MCP block to `.codex/config.toml`, which Codex loads for trusted projects. The block uses an allowlist containing only authentication status, metadata, and document-reading tools. Existing Codex settings and unrelated MCP servers are preserved. See the [official Codex MCP configuration documentation](https://developers.openai.com/codex/mcp).
+For Codex, project installations write one marked harness-owned MCP block to `.codex/config.toml`, which Codex loads for trusted projects. It configures Jira, GitLab, and Chrome DevTools with environment-variable references; URLs can be retained as non-secret static configuration. Google Docs is optional and uses an allowlist containing only authentication status, metadata, and document-reading tools. Existing Codex settings and unrelated MCP servers are preserved. If an unmanaged server already uses one of the managed names (`jira`, `gitlab`, `chrome-devtools`, or `google-docs`), installation stops rather than overwriting it. See the [official Codex MCP configuration documentation](https://developers.openai.com/codex/mcp).
 
 ## Workflow commands
 
